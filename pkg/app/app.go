@@ -56,16 +56,9 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("create grantsync client: %w", err)
 	}
 
-	// Resolve project names to IDs (if rules use names).
-	// If resolution fails, assume rules contain IDs directly (Pulumi-generated).
-	projectIDs, err := resolveProjectIDs(ctx, logger, syncer, rules)
-	if err != nil {
-		logger.WarnContext(ctx, "project ID resolution failed, assuming rules contain IDs directly",
-			slog.Any("error", err),
-		)
-
-		projectIDs = nil
-	}
+	// RULES_JSON from Pulumi always contains project IDs directly (not names).
+	// Skip name→ID resolution — pass nil so the handler uses IDs as-is.
+	var projectIDs map[string]string
 
 	// Create JWT verifier for webhook payload verification.
 	// JWKS URL is derived from ZITADEL_DOMAIN.
@@ -82,30 +75,6 @@ func Run(ctx context.Context) error {
 		Port:       cfg.Port,
 		HealthPort: cfg.HealthPort,
 	}, groupsResolver, m, syncer, projectIDs, jwtVerifier)
-}
-
-// resolveProjectIDs looks up Zitadel project IDs for all project names referenced in rules.
-func resolveProjectIDs(ctx context.Context, logger *slog.Logger, syncer *grantsync.Syncer, rules []mapper.Rule) (map[string]string, error) {
-	projectNames := make(map[string]struct{})
-	for _, rule := range rules {
-		for _, grant := range rule.Grants {
-			projectNames[grant.Project] = struct{}{}
-		}
-	}
-
-	projectIDs := make(map[string]string, len(projectNames))
-
-	for name := range projectNames {
-		id, err := syncer.LookupProjectID(ctx, name)
-		if err != nil {
-			return nil, fmt.Errorf("lookup project %q: %w", name, err)
-		}
-
-		projectIDs[name] = id
-		logger.InfoContext(ctx, "resolved project", slog.String("name", name), slog.String("id", id))
-	}
-
-	return projectIDs, nil
 }
 
 func newLogger(level, format string) *slog.Logger {

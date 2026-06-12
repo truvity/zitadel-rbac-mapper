@@ -54,9 +54,11 @@ func Run(
 		return c.SendStatus(fiber.StatusOK)
 	})
 
+	listenCfg := fiber.ListenConfig{DisableStartupMessage: true}
+
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.HealthPort)
-		if err := healthApp.Listen(addr); err != nil {
+		if err := healthApp.Listen(addr, listenCfg); err != nil {
 			logger.ErrorContext(ctx, "health server error", slog.Any("error", err))
 		}
 	}()
@@ -66,7 +68,7 @@ func Run(
 		addr := fmt.Sprintf(":%d", cfg.Port)
 		logger.InfoContext(ctx, "listening", slog.String("addr", addr))
 
-		if err := app.Listen(addr); err != nil {
+		if err := app.Listen(addr, listenCfg); err != nil {
 			logger.ErrorContext(ctx, "server error", slog.Any("error", err))
 		}
 	}()
