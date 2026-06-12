@@ -19,6 +19,7 @@ type (
 	zitadelFunctionPayload struct {
 		Function string      `json:"function"`
 		User     zitadelUser `json:"user"`
+		Org      *zitadelOrg `json:"org,omitempty"`
 	}
 
 	zitadelUser struct {
@@ -29,6 +30,12 @@ type (
 
 	zitadelHuman struct {
 		Email string `json:"email"`
+	}
+
+	zitadelOrg struct {
+		ID            string `json:"id"`
+		Name          string `json:"name"`
+		PrimaryDomain string `json:"primary_domain"`
 	}
 
 	// appendClaim is a single claim to append to the token.
@@ -157,7 +164,13 @@ func NewZitadelWebhookHandler(
 				})
 			}
 
-			result, syncErr := syncer.Sync(ctx, userID, desired)
+			// Pass org ID from the function payload to scope Management API calls.
+			var orgID string
+			if payload.Org != nil {
+				orgID = payload.Org.ID
+			}
+
+			result, syncErr := syncer.Sync(ctx, userID, desired, orgID)
 			if syncErr != nil {
 				logger.WarnContext(ctx, "grant sync failed",
 					slog.String("user_id", userID),

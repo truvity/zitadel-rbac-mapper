@@ -16,6 +16,7 @@ const problemBase = "https://github.com/truvity/zitadel-rbac-mapper/problems/"
 type SyncRequest struct {
 	UserID string `json:"userId"`
 	Email  string `json:"email"`
+	OrgID  string `json:"orgId,omitempty"`
 }
 
 // SyncResponse is the JSON response for POST /sync.
@@ -100,7 +101,7 @@ func NewSyncHandler(
 		}
 
 		// Sync grants in Zitadel.
-		result, err := syncer.Sync(ctx, req.UserID, desired)
+		result, err := syncer.Sync(ctx, req.UserID, desired, req.OrgID)
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to sync grants",
 				slog.String("user_id", req.UserID),

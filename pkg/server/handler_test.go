@@ -123,7 +123,7 @@ func newMockSyncHandler(
 			})
 		}
 
-		result, err := syncer.Sync(ctx, req.UserID, desired)
+		result, err := syncer.Sync(ctx, req.UserID, desired, req.OrgID)
 		if err != nil {
 			c.Set("Content-Type", "application/problem+json")
 
@@ -145,7 +145,7 @@ func newMockSyncHandler(
 	}
 }
 
-func (m *mockSyncer) Sync(_ context.Context, _ string, _ []grantsync.DesiredGrant) (*grantsync.SyncResult, error) {
+func (m *mockSyncer) Sync(_ context.Context, _ string, _ []grantsync.DesiredGrant, _ string) (*grantsync.SyncResult, error) {
 	return m.result, m.err
 }
 

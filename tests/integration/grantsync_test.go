@@ -13,7 +13,7 @@ func TestSync_AddGrant(t *testing.T) {
 	ctx := context.Background()
 
 	// Clean slate: sync with empty desired to remove any leftover grants.
-	_, err := syncer.Sync(ctx, cfg.Test.UserID, nil)
+	_, err := syncer.Sync(ctx, cfg.Test.UserID, nil, "")
 	if err != nil {
 		t.Fatalf("cleanup sync: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestSync_AddGrant(t *testing.T) {
 		{ProjectID: projectID, RoleKeys: []string{"viewer"}},
 	}
 
-	result, err := syncer.Sync(ctx, cfg.Test.UserID, desired)
+	result, err := syncer.Sync(ctx, cfg.Test.UserID, desired, "")
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -52,13 +52,13 @@ func TestSync_Idempotent(t *testing.T) {
 	}
 
 	// First sync to ensure state.
-	_, err := syncer.Sync(ctx, cfg.Test.UserID, desired)
+	_, err := syncer.Sync(ctx, cfg.Test.UserID, desired, "")
 	if err != nil {
 		t.Fatalf("setup sync: %v", err)
 	}
 
 	// Second sync should be no-op.
-	result, err := syncer.Sync(ctx, cfg.Test.UserID, desired)
+	result, err := syncer.Sync(ctx, cfg.Test.UserID, desired, "")
 	if err != nil {
 		t.Fatalf("idempotent sync: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestSync_UpdateRoles(t *testing.T) {
 		{ProjectID: projectID, RoleKeys: []string{"viewer"}},
 	}
 
-	_, err := syncer.Sync(ctx, cfg.Test.UserID, initial)
+	_, err := syncer.Sync(ctx, cfg.Test.UserID, initial, "")
 	if err != nil {
 		t.Fatalf("initial sync: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestSync_UpdateRoles(t *testing.T) {
 		{ProjectID: projectID, RoleKeys: []string{"viewer", "admin"}},
 	}
 
-	result, err := syncer.Sync(ctx, cfg.Test.UserID, updated)
+	result, err := syncer.Sync(ctx, cfg.Test.UserID, updated, "")
 	if err != nil {
 		t.Fatalf("update sync: %v", err)
 	}
@@ -112,13 +112,13 @@ func TestSync_RemoveGrant(t *testing.T) {
 		{ProjectID: projectID, RoleKeys: []string{"viewer"}},
 	}
 
-	_, err := syncer.Sync(ctx, cfg.Test.UserID, desired)
+	_, err := syncer.Sync(ctx, cfg.Test.UserID, desired, "")
 	if err != nil {
 		t.Fatalf("setup sync: %v", err)
 	}
 
 	// Now sync with empty desired — should remove the grant.
-	result, err := syncer.Sync(ctx, cfg.Test.UserID, nil)
+	result, err := syncer.Sync(ctx, cfg.Test.UserID, nil, "")
 	if err != nil {
 		t.Fatalf("remove sync: %v", err)
 	}
@@ -138,13 +138,13 @@ func TestSync_RemoveIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	// Ensure clean slate.
-	_, err := syncer.Sync(ctx, cfg.Test.UserID, nil)
+	_, err := syncer.Sync(ctx, cfg.Test.UserID, nil, "")
 	if err != nil {
 		t.Fatalf("cleanup sync: %v", err)
 	}
 
 	// Second removal should be no-op.
-	result, err := syncer.Sync(ctx, cfg.Test.UserID, nil)
+	result, err := syncer.Sync(ctx, cfg.Test.UserID, nil, "")
 	if err != nil {
 		t.Fatalf("idempotent remove sync: %v", err)
 	}

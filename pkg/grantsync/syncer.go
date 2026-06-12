@@ -11,6 +11,7 @@ import (
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/client"
+	"github.com/zitadel/zitadel-go/v3/pkg/client/middleware"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/project"
@@ -76,7 +77,14 @@ func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) 
 // compares against desired, and performs add/update/remove as needed.
 // The operation is idempotent — calling Sync with the same desired grants
 // multiple times results in no API writes after the first call.
-func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant) (*SyncResult, error) {
+//
+// orgID optionally scopes the Management API calls to the given organization.
+// If empty, the API defaults to the authenticated user's organization.
+func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant, orgID string) (*SyncResult, error) {
+	if orgID != "" {
+		ctx = middleware.SetOrgID(ctx, orgID)
+	}
+
 	// List current grants for the user.
 	existing, err := s.listUserGrants(ctx, userID)
 	if err != nil {
