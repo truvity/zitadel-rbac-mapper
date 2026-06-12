@@ -30,8 +30,7 @@ func Run(
 	m *mapper.Mapper,
 	syncer *grantsync.Syncer,
 	projectIDs map[string]string,
-	verifier zitadeljwt.Verifier,
-	jwtVerifier JWTPayloadVerifier,
+	jwtVerifier *zitadeljwt.Verifier,
 ) error {
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  10 * time.Second,
@@ -41,9 +40,6 @@ func Run(
 
 	// Request logging middleware.
 	app.Use(slogfiber.New(logger))
-
-	// Payload verification middleware (no-op if verifier is nil).
-	app.Use(zitadeljwt.FiberMiddleware(logger, verifier))
 
 	// Routes.
 	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, m, syncer, projectIDs, jwtVerifier))
@@ -75,7 +71,7 @@ func Run(
 		}
 	}()
 
-	// Block until context is canceled (signal from parent).
+	// Block until context is canceled.
 	<-ctx.Done()
 	logger.InfoContext(ctx, "shutting down")
 

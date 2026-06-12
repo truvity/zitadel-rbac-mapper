@@ -15,7 +15,6 @@ import (
 	"github.com/truvity/zitadel-rbac-mapper/pkg/grantsync"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/mapper"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/server"
-	"github.com/truvity/zitadel-rbac-mapper/pkg/zitadeljwt"
 )
 
 type (
@@ -56,7 +55,6 @@ func newTestApp(t *testing.T, res *mockResolver, syncer *mockSyncer) *fiber.App 
 
 	// Create a wrapper that satisfies the handler signature.
 	app := fiber.New()
-	app.Use(zitadeljwt.FiberMiddleware(logger, nil)) // no verification in tests
 	app.Post("/sync", newMockSyncHandler(logger, res, m, syncer, projectIDs))
 
 	return app

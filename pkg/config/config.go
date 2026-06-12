@@ -10,16 +10,11 @@ import (
 
 // Config holds all service configuration loaded from environment variables.
 type Config struct {
-	// Payload verification.
-	PayloadType string // "jwt", "hmac", or "" (no verification).
-	JWKSUrl     string // JWKS URL for JWT verification.
-	SigningKey  string // HMAC signing key.
-
 	// Groups resolver.
 	GroupsResolverURL string
 
-	// Zitadel API (grantsync connection).
-	ZitadelDomain  string // Zitadel instance domain (e.g., "my-instance.zitadel.cloud").
+	// Zitadel connection (grantsync gRPC + JWKS for webhook verification).
+	ZitadelDomain  string // Zitadel instance domain (e.g., "auth.truvity.xyz").
 	ZitadelPort    string // Zitadel gRPC port (default: "443").
 	ZitadelKeyFile string // Path to JWT key JSON file (mutually exclusive with ZitadelKeyJSON).
 	ZitadelKeyJSON string // Raw JWT key JSON (mutually exclusive with ZitadelKeyFile).
@@ -40,9 +35,6 @@ type Config struct {
 // Load reads configuration from environment variables and validates it.
 func Load() (*Config, error) {
 	cfg := &Config{
-		PayloadType:       os.Getenv("ZITADEL_PAYLOAD_TYPE"),
-		JWKSUrl:           os.Getenv("ZITADEL_JWKS_URL"),
-		SigningKey:        os.Getenv("ZITADEL_SIGNING_KEY"),
 		GroupsResolverURL: os.Getenv("GROUPS_RESOLVER_URL"),
 		ZitadelDomain:     os.Getenv("ZITADEL_DOMAIN"),
 		ZitadelPort:       envOrDefault("ZITADEL_PORT", "443"),
@@ -96,21 +88,6 @@ func (c *Config) validate() error {
 
 	if c.RulesFile != "" && c.RulesJSON != "" {
 		return fmt.Errorf("RULES_FILE and RULES_JSON are mutually exclusive")
-	}
-
-	switch c.PayloadType {
-	case "", "jwt", "hmac":
-		// Valid.
-	default:
-		return fmt.Errorf("ZITADEL_PAYLOAD_TYPE must be 'jwt', 'hmac', or empty (got %q)", c.PayloadType)
-	}
-
-	if c.PayloadType == "jwt" && c.JWKSUrl == "" {
-		return fmt.Errorf("ZITADEL_JWKS_URL is required when ZITADEL_PAYLOAD_TYPE=jwt")
-	}
-
-	if c.PayloadType == "hmac" && c.SigningKey == "" {
-		return fmt.Errorf("ZITADEL_SIGNING_KEY is required when ZITADEL_PAYLOAD_TYPE=hmac")
 	}
 
 	if c.RulesJSON != "" && !json.Valid([]byte(c.RulesJSON)) {

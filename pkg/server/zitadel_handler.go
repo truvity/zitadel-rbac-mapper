@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -11,16 +10,11 @@ import (
 	"github.com/truvity/zitadel-rbac-mapper/pkg/grantsync"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/mapper"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/resolver"
+	"github.com/truvity/zitadel-rbac-mapper/pkg/zitadeljwt"
 )
 
 // Zitadel Actions V2 payload types.
 type (
-	// JWTPayloadVerifier verifies a JWT and extracts its payload.
-	// Used when target is configured with PAYLOAD_TYPE_JWT.
-	JWTPayloadVerifier interface {
-		VerifyAndExtract(ctx context.Context, jwtBytes []byte) ([]byte, error)
-	}
-
 	// zitadelEnvelope detects the incoming payload type.
 	zitadelEnvelope struct {
 		EventType string `json:"event_type"`
@@ -70,7 +64,7 @@ func NewZitadelWebhookHandler(
 	m *mapper.Mapper,
 	syncer *grantsync.Syncer,
 	projectIDs map[string]string,
-	jwtVerifier JWTPayloadVerifier,
+	jwtVerifier *zitadeljwt.Verifier,
 ) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		ctx := c.Context()

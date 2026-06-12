@@ -1,3 +1,9 @@
+// Package zitadeljwt verifies JWT-signed payloads from Zitadel Actions V2 webhooks.
+//
+// When a Zitadel ActionTarget is configured with PAYLOAD_TYPE_JWT, the request body
+// is a compact JWS signed by the instance's key. This package fetches the JWKS from
+// the instance's well-known endpoint and verifies the signature, returning the
+// extracted payload (the actual Actions V2 JSON).
 package zitadeljwt
 
 import (
@@ -13,50 +19,33 @@ import (
 	"github.com/lestrrat-go/jwx/v4/jws"
 )
 
-// jwtVerifier validates JWTs using JWKS from the Zitadel instance.
-type jwtVerifier struct {
-	url    string
-	keySet jwk.Set
-	mu     sync.RWMutex
-	client *http.Client
+// Verifier verifies Zitadel JWT-signed webhook payloads and extracts the JSON body.
+type Verifier struct {
+	jwksURL string
+	keySet  jwk.Set
+	mu      sync.RWMutex
+	client  *http.Client
 }
 
-func newJWTVerifier(jwksURL string) *jwtVerifier {
-	return &jwtVerifier{
-		url: jwksURL,
+// New creates a Verifier for the given Zitadel domain.
+// JWKS URL is derived as https://<domain>/oauth/v2/keys.
+func New(domain string) *Verifier {
+	return &Verifier{
+		jwksURL: "https://" + domain + "/oauth/v2/keys",
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
 }
 
-// Verify checks the JWT signature using the JWKS keyset.
-// Zitadel sends the entire request body as a signed JWT (compact serialization).
-func (v *jwtVerifier) Verify(ctx context.Context, body []byte) error {
-	keySet, err := v.getKeySet(ctx)
-	if err != nil {
-		return err
-	}
-
-	// Verify the JWS signature.
-	_, err = jws.Verify(body, jws.WithKeySet(keySet))
-	if err != nil {
-		return fmt.Errorf("JWT verification failed: %w", err)
-	}
-
-	return nil
-}
-
-// VerifyAndExtract verifies the JWT and returns the payload (claims JSON).
-// This is used when Zitadel sends PAYLOAD_TYPE_JWT — the body is a compact JWS
-// and the payload contains the actual Actions V2 JSON.
-func (v *jwtVerifier) VerifyAndExtract(ctx context.Context, body []byte) ([]byte, error) {
+// VerifyAndExtract verifies the JWT signature and returns the payload (JSON bytes).
+// The input is the raw request body (a compact JWS string).
+func (v *Verifier) VerifyAndExtract(ctx context.Context, body []byte) ([]byte, error) {
 	keySet, err := v.getKeySet(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	// Verify and extract the payload.
 	payload, err := jws.Verify(body, jws.WithKeySet(keySet))
 	if err != nil {
 		return nil, fmt.Errorf("JWT verification failed: %w", err)
@@ -65,8 +54,8 @@ func (v *jwtVerifier) VerifyAndExtract(ctx context.Context, body []byte) ([]byte
 	return payload, nil
 }
 
-// getKeySet fetches and caches the JWKS keyset (lazy initialization).
-func (v *jwtVerifier) getKeySet(ctx context.Context) (jwk.Set, error) {
+// getKeySet fetches and caches the JWKS (lazy initialization).
+func (v *Verifier) getKeySet(ctx context.Context) (jwk.Set, error) {
 	v.mu.RLock()
 	if v.keySet != nil {
 		defer v.mu.RUnlock()
@@ -77,7 +66,6 @@ func (v *jwtVerifier) getKeySet(ctx context.Context) (jwk.Set, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	// Double-check after acquiring write lock.
 	if v.keySet != nil {
 		return v.keySet, nil
 	}
@@ -92,38 +80,32 @@ func (v *jwtVerifier) getKeySet(ctx context.Context) (jwk.Set, error) {
 	return keySet, nil
 }
 
-// fetchJWKS fetches the JWKS from the URL and parses it into a jwk.Set.
-func (v *jwtVerifier) fetchJWKS(ctx context.Context) (jwk.Set, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.url, http.NoBody)
+// fetchJWKS fetches the JWKS from the Zitadel instance.
+func (v *Verifier) fetchJWKS(ctx context.Context) (jwk.Set, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, v.jwksURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create JWKS request: %w", err)
 	}
 
 	resp, err := v.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch JWKS from %s: %w", v.url, err)
+		return nil, fmt.Errorf("fetch JWKS from %s: %w", v.jwksURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch JWKS from %s: status %d", v.url, resp.StatusCode)
+		return nil, fmt.Errorf("fetch JWKS from %s: status %d", v.jwksURL, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read JWKS response: %w", err)
 	}
 
 	set := jwk.NewSet()
-	if err := json.Unmarshal(body, set); err != nil {
+	if err := json.Unmarshal(data, set); err != nil {
 		return nil, fmt.Errorf("parse JWKS: %w", err)
 	}
 
 	return set, nil
-}
-
-// NewJWTPayloadVerifier creates a verifier that extracts and verifies JWT payloads.
-// Used when Zitadel sends PAYLOAD_TYPE_JWT to the webhook endpoint.
-func NewJWTPayloadVerifier(jwksURL string) *jwtVerifier {
-	return newJWTVerifier(jwksURL)
 }
