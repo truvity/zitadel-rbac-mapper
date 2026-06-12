@@ -45,6 +45,7 @@ func Run(
 	app.Use(zitadeljwt.FiberMiddleware(logger, verifier))
 
 	// Routes.
+	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, m, syncer, projectIDs))
 	app.Post("/sync", NewSyncHandler(logger, res, m, syncer, projectIDs))
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusOK)
