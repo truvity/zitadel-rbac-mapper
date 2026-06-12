@@ -1,85 +1,51 @@
 # Zitadel RBAC Mapper
 
-Groups-to-grants mapping webhook for [Zitadel](https://zitadel.com) Actions V2. Receives payloads from Zitadel, resolves user's group memberships via an external resolver, maps groups to roles, and either enriches tokens with a `groups` claim or syncs UserGrants in Zitadel.
+Groups-to-grants mapping webhook for [Zitadel](https://zitadel.com) Actions V2. Resolves user's Google Workspace group memberships, maps groups to project roles, syncs UserGrants, and enriches tokens with a `groups` claim — all in a single synchronous function call during the OIDC flow.
 
 ## What it does
 
-1. **Token enrichment** (function manipulation via `restCall` target): Zitadel calls this webhook during `preaccesstoken`/`preuserinfo`. The mapper resolves the user's groups and returns `append_claims` with a `groups` claim containing group email addresses.
+On every login (OIDC token issuance), Zitadel calls this webhook via `preuserinfo`/`preaccesstoken` function executions. The webhook:
 
-2. **Event-driven grant sync** (events via `restWebhook` target): Zitadel sends `user.human.added` or `session.added` events. The mapper resolves groups, maps them to project roles via rules, and syncs UserGrants in Zitadel (add/update/remove).
+1. **Resolves groups** — calls google-group-sync (localhost:9090) to get the user's Google Workspace group emails
+2. **Syncs grants** — maps groups to project roles via configured rules, then performs idempotent add/update/remove of UserGrants in Zitadel via gRPC
+3. **Enriches token** — returns `append_claims` with a `groups` claim containing the group email list
+
+The grant sync is idempotent — if grants are already correct, no Zitadel API calls are made.
 
 ## Architecture
 
 ```
-[User authenticates] → [Zitadel Actions V2]
-                              │
-                              ├─ function/preaccesstoken ──→ [restCall target]  ──→ POST /webhook
-                              ├─ function/preuserinfo   ──→ [restCall target]  ──→ POST /webhook
-                              ├─ event/session.added    ──→ [restWebhook target] → POST /webhook
-                              └─ event/user.human.added ──→ [restWebhook target] → POST /webhook
-                                                                                        │
-                                                                [zitadel-rbac-mapper Lambda]
-                                                                        │
-                                                                        ├─→ google-group-sync extension (localhost:9090)
-                                                                        ├─→ maps groups to roles via RULES_JSON
-                                                                        └─→ returns append_claims OR syncs UserGrants via gRPC
+[User logs in] → [Zitadel OIDC flow]
+                        │
+                        ├─ function/preuserinfo  ──→ [restCall target] ──→ POST /webhook
+                        └─ function/preaccesstoken → [restCall target] ──→ POST /webhook
+                                                                                │
+                                                        [zitadel-rbac-mapper Lambda]
+                                                                │
+                                                                ├─ google-group-sync extension (localhost:9090)
+                                                                ├─ resolve groups → map to grants → sync via gRPC
+                                                                └─ return {"append_claims": [{"key":"groups","value":[...]}]}
 ```
+
+## Why Functions, Not Events
+
+Grant sync runs in the **`preuserinfo` function** (not as an async event handler) because:
+
+- **Timing**: Grants must exist before the token is issued. Async events arrive after the fact — too late.
+- **Reliability**: Functions are synchronous and inline. Events have no delivery guarantees and can be delayed/dropped on Zitadel Cloud.
+- **Idempotency**: The sync is diff-based. Running on every login is safe — no-op if nothing changed.
+- **Simplicity**: One target, two executions. No event infrastructure needed.
 
 ## Zitadel Configuration
 
-### Two Targets Required
-
-Zitadel Actions V2 uses two target types with different semantics:
-
-| Target Type | Purpose | Response Handling |
-|-------------|---------|-------------------|
-| **REST Call** (`restCall`) | Function manipulation (token enrichment) | Zitadel **reads the response body** and applies `append_claims` to the token |
-| **REST Webhook** (`restWebhook`) | Event notification (grant sync) | Zitadel **ignores the response body** (fire-and-forget, only checks status code) |
-
-Both targets point to the **same endpoint** (`/webhook`). The handler detects the payload type automatically.
-
-### Payload Format Differences
-
-Zitadel sends different JSON structures for functions vs events:
-
-**Function payload** (preaccesstoken/preuserinfo):
-```json
-{
-  "function": "function/preuserinfo",
-  "user": {
-    "id": "376395181659810454",
-    "username": "user@example.com",
-    "human": { "email": "user@example.com", ... }
-  },
-  "userinfo": { "sub": "376395181659810454" }
-}
-```
-
-**Event payload** (session.added/user.human.added):
-```json
-{
-  "aggregateID": "...",
-  "aggregateType": "user",
-  "event_type": "session.added",
-  "userID": "376395181659810454",
-  "event_payload": {
-    "email": "user@example.com",
-    "userName": "user@example.com"
-  }
-}
-```
-
-### Setup Steps
-
-#### 1. Create REST Call target (for token enrichment)
+### 1. Create a REST Call target
 
 ```bash
-curl -L -X POST 'https://<DOMAIN>/v2/actions/targets' \
+curl -L -X POST 'https://<ZITADEL_DOMAIN>/v2/actions/targets' \
 -H 'Content-Type: application/json' \
--H 'Accept: application/json' \
 -H 'Authorization: Bearer <PAT>' \
 --data-raw '{
-  "name": "rbac-mapper-call",
+  "name": "rbac-mapper",
   "restCall": {
     "interruptOnError": false
   },
@@ -89,51 +55,39 @@ curl -L -X POST 'https://<DOMAIN>/v2/actions/targets' \
 }'
 ```
 
-#### 2. Create REST Webhook target (for events)
+**Important:**
+- Target type must be **REST Call** (not Webhook) — Zitadel reads the response body to apply `append_claims`
+- Payload type **JWT** — the body is signed with the instance key, verified via JWKS
+- `interruptOnError: false` — token issuance continues even if the webhook fails
+
+### 2. Create function executions
 
 ```bash
-curl -L -X POST 'https://<DOMAIN>/v2/actions/targets' \
+# Adds "groups" claim to userinfo endpoint
+curl -L -X PUT 'https://<ZITADEL_DOMAIN>/v2/actions/executions' \
 -H 'Content-Type: application/json' \
--H 'Accept: application/json' \
 -H 'Authorization: Bearer <PAT>' \
---data-raw '{
-  "name": "rbac-mapper-webhook",
-  "restWebhook": {
-    "interruptOnError": false
-  },
-  "endpoint": "https://<LAMBDA_FUNCTION_URL>/webhook",
-  "timeout": "30s",
-  "payloadType": "PAYLOAD_TYPE_JWT"
-}'
+--data-raw '{"condition":{"function":{"name":"preuserinfo"}},"targets":["<TARGET_ID>"]}'
+
+# Adds "groups" claim to access token
+curl -L -X PUT 'https://<ZITADEL_DOMAIN>/v2/actions/executions' \
+-H 'Content-Type: application/json' \
+-H 'Authorization: Bearer <PAT>' \
+--data-raw '{"condition":{"function":{"name":"preaccesstoken"}},"targets":["<TARGET_ID>"]}'
 ```
 
-#### 3. Create executions
+### Final configuration
 
-```bash
-# Token enrichment — adds "groups" claim to userinfo
-curl -L -X PUT 'https://<DOMAIN>/v2/actions/executions' \
--H 'Content-Type: application/json' \
--H 'Authorization: Bearer <PAT>' \
---data-raw '{"condition":{"function":{"name":"preuserinfo"}},"targets":["<CALL_TARGET_ID>"]}'
+| Target | Type | Payload | Timeout |
+|--------|------|---------|---------|
+| `rbac-mapper` | REST Call | JWT | 30s |
 
-# Token enrichment — adds "groups" claim to access token
-curl -L -X PUT 'https://<DOMAIN>/v2/actions/executions' \
--H 'Content-Type: application/json' \
--H 'Authorization: Bearer <PAT>' \
---data-raw '{"condition":{"function":{"name":"preaccesstoken"}},"targets":["<CALL_TARGET_ID>"]}'
+| Execution | Condition | Effect |
+|-----------|-----------|--------|
+| preuserinfo | `function/preuserinfo` | Groups claim in userinfo + grant sync |
+| preaccesstoken | `function/preaccesstoken` | Groups claim in access token + grant sync |
 
-# Grant sync on user creation
-curl -L -X PUT 'https://<DOMAIN>/v2/actions/executions' \
--H 'Content-Type: application/json' \
--H 'Authorization: Bearer <PAT>' \
---data-raw '{"condition":{"event":{"event":"user.human.added"}},"targets":["<WEBHOOK_TARGET_ID>"]}'
-
-# Grant sync on login
-curl -L -X PUT 'https://<DOMAIN>/v2/actions/executions' \
--H 'Content-Type: application/json' \
--H 'Authorization: Bearer <PAT>' \
---data-raw '{"condition":{"event":{"event":"session.added"}},"targets":["<WEBHOOK_TARGET_ID>"]}'
-```
+No event executions needed. No webhook targets needed.
 
 ## Environment Variables
 
@@ -174,13 +128,11 @@ Rules map Google Workspace groups to Zitadel project roles:
 ]
 ```
 
-The `project` field can be either a project name (resolved at startup via Zitadel API) or a project ID directly (when generated by Pulumi).
+The `project` field can be a project name (resolved at startup) or a project ID directly (when generated by Pulumi).
 
 ## Deployment
 
 ### AWS Lambda (with google-group-sync extension)
-
-The recommended deployment uses the zitadel-rbac-mapper Lambda with the google-group-sync extension as a sidecar:
 
 ```
 [zitadel-rbac-mapper Lambda]
@@ -188,8 +140,8 @@ The recommended deployment uses the zitadel-rbac-mapper Lambda with the google-g
   ├── google-group-sync extension layer (HTTP on :9090)
   │     └── reads GGS_SA_KEY_SECRET_NAME from Secrets Manager
   └── rbac-mapper binary
-        ├── POST /webhook — dispatches function/event payloads
-        ├── POST /sync — direct sync API
+        ├── POST /webhook — function payload handler
+        ├── POST /sync — direct sync API (programmatic use)
         └── GET /health — health check
 ```
 
