@@ -70,19 +70,27 @@ func NewSyncHandler(
 			)
 		}
 
-		// Map groups to desired grants (project name → roles).
+		// Convert mapper output to grantsync DesiredGrants (resolve project name → ID).
+		// If projectIDs is nil, the rules already contain project IDs directly.
 		mapperGrants := m.MapGroups(groups)
 
-		// Convert mapper output to grantsync DesiredGrants (resolve project name → ID).
 		desired := make([]grantsync.DesiredGrant, 0, len(mapperGrants))
 		for _, mg := range mapperGrants {
-			projectID, ok := projectIDs[mg.Project]
-			if !ok {
-				logger.WarnContext(ctx, "project not found in ID map, skipping",
-					slog.String("project", mg.Project),
-				)
+			var projectID string
+			if projectIDs != nil {
+				id, ok := projectIDs[mg.Project]
+				if !ok {
+					logger.WarnContext(ctx, "project not found in ID map, skipping",
+						slog.String("project", mg.Project),
+					)
 
-				continue
+					continue
+				}
+
+				projectID = id
+			} else {
+				// Rules already contain project IDs.
+				projectID = mg.Project
 			}
 
 			desired = append(desired, grantsync.DesiredGrant{

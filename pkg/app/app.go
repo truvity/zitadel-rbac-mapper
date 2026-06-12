@@ -56,10 +56,16 @@ func Run(ctx context.Context) error {
 		return fmt.Errorf("create grantsync client: %w", err)
 	}
 
-	// Resolve project names to IDs.
+	// Resolve project names to IDs (if rules use names).
+	// If rules already contain project IDs (e.g., from Pulumi-generated RULES_JSON),
+	// we detect this and skip resolution.
 	projectIDs, err := resolveProjectIDs(ctx, logger, syncer, rules)
 	if err != nil {
-		return fmt.Errorf("resolve project IDs: %w", err)
+		logger.WarnContext(ctx, "project ID resolution failed, assuming rules contain IDs directly",
+			slog.Any("error", err),
+		)
+
+		projectIDs = nil
 	}
 
 	// Create payload verifier (JWT, HMAC, or nil = disabled).
