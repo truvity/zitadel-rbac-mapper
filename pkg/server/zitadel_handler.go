@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -14,6 +15,12 @@ import (
 
 // Zitadel Actions V2 payload types.
 type (
+	// JWTPayloadVerifier verifies a JWT and extracts its payload.
+	// Used when target is configured with PAYLOAD_TYPE_JWT.
+	JWTPayloadVerifier interface {
+		VerifyAndExtract(ctx context.Context, jwtBytes []byte) ([]byte, error)
+	}
+
 	// zitadelEnvelope detects the incoming payload type.
 	zitadelEnvelope struct {
 		EventType string `json:"event_type"`
@@ -54,21 +61,41 @@ type (
 //   - Event payloads (user.human.added, session.added) → sync user grants
 //   - Function payloads (preaccesstoken, preuserinfo) → return groups claim
 //
-// This is the single endpoint to configure as Zitadel ActionTarget.
+// When ZITADEL_PAYLOAD_TYPE=jwt, the body is a signed JWT (compact JWS).
+// The handler verifies the signature via JWKS and extracts the payload.
+// When empty or "json", the body is plain JSON (optionally HMAC-signed via header).
 func NewZitadelWebhookHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
 	m *mapper.Mapper,
 	syncer *grantsync.Syncer,
 	projectIDs map[string]string,
+	jwtVerifier JWTPayloadVerifier,
 ) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		ctx := c.Context()
 		body := c.Body()
 
+		// If JWT payload type is configured, unwrap the JWT to get the actual payload.
+		var payloadBytes []byte
+		if jwtVerifier != nil {
+			verified, err := jwtVerifier.VerifyAndExtract(ctx, body)
+			if err != nil {
+				logger.ErrorContext(ctx, "JWT verification failed", slog.Any("error", err))
+
+				return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+					"error": "JWT verification failed",
+				})
+			}
+
+			payloadBytes = verified
+		} else {
+			payloadBytes = body
+		}
+
 		// Detect payload type.
 		var envelope zitadelEnvelope
-		if err := json.Unmarshal(body, &envelope); err != nil {
+		if err := json.Unmarshal(payloadBytes, &envelope); err != nil {
 			logger.ErrorContext(ctx, "failed to parse webhook envelope", slog.Any("error", err))
 
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
@@ -78,7 +105,7 @@ func NewZitadelWebhookHandler(
 
 		// Parse the full payload.
 		var payload zitadelPayload
-		if err := json.Unmarshal(body, &payload); err != nil {
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
 			logger.ErrorContext(ctx, "failed to parse webhook payload", slog.Any("error", err))
 
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{

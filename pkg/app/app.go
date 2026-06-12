@@ -89,7 +89,24 @@ func Run(ctx context.Context) error {
 	return server.Run(ctx, logger, server.Config{
 		Port:       cfg.Port,
 		HealthPort: cfg.HealthPort,
-	}, groupsResolver, m, syncer, projectIDs, verifier)
+	}, groupsResolver, m, syncer, projectIDs, verifier, createJWTPayloadVerifier(cfg))
+}
+
+// createJWTPayloadVerifier creates a JWT payload verifier for the /webhook endpoint.
+// If PayloadType is "jwt", it creates a verifier using the JWKS URL (defaulting to
+// https://<domain>/oauth/v2/keys if not explicitly set).
+// Returns nil if PayloadType is not "jwt".
+func createJWTPayloadVerifier(cfg *config.Config) server.JWTPayloadVerifier {
+	if cfg.PayloadType != "jwt" {
+		return nil
+	}
+
+	jwksURL := cfg.JWKSUrl
+	if jwksURL == "" {
+		jwksURL = "https://" + cfg.ZitadelDomain + "/oauth/v2/keys"
+	}
+
+	return zitadeljwt.NewJWTPayloadVerifier(jwksURL)
 }
 
 // resolveProjectIDs looks up Zitadel project IDs for all project names referenced in rules.

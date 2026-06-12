@@ -31,6 +31,7 @@ func Run(
 	syncer *grantsync.Syncer,
 	projectIDs map[string]string,
 	verifier zitadeljwt.Verifier,
+	jwtVerifier JWTPayloadVerifier,
 ) error {
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  10 * time.Second,
@@ -45,7 +46,7 @@ func Run(
 	app.Use(zitadeljwt.FiberMiddleware(logger, verifier))
 
 	// Routes.
-	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, m, syncer, projectIDs))
+	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, m, syncer, projectIDs, jwtVerifier))
 	app.Post("/sync", NewSyncHandler(logger, res, m, syncer, projectIDs))
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusOK)
