@@ -1,0 +1,11 @@
+{{- if .Values.rules }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "zitadel-rbac-mapper.fullname" . }}-rules
+  labels:
+    {{- include "zitadel-rbac-mapper.labels" . | nindent 4 }}
+data:
+  rules.yaml: |
+    {{- .Values.rules | toYaml | nindent 4 }}
+{{- end }}

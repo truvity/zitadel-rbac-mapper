@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "zitadel-rbac-mapper.fullname" . }}
+  labels:
+    {{- include "zitadel-rbac-mapper.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "zitadel-rbac-mapper.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "zitadel-rbac-mapper.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/rules: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name | default (include "zitadel-rbac-mapper.fullname" .) }}
+      containers:
+        - name: zitadel-rbac-mapper
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.env.PORT | default 8080 }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+              protocol: TCP
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if .Values.zitadelKey.secretName }}
+            - name: ZITADEL_KEY_FILE
+              value: {{ .Values.zitadelKey.mountPath | quote }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            {{- if .Values.rules }}
+            - name: rules
+              mountPath: /etc/config
+              readOnly: true
+            {{- end }}
+            {{- if .Values.zitadelKey.secretName }}
+            - name: zitadel-key
+              mountPath: {{ dir .Values.zitadelKey.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.sidecar.enabled .Values.sidecar.saKey.secretName }}
+            - name: google-sa-key
+              mountPath: /etc/secrets
+              readOnly: true
+            {{- end }}
+        {{- if .Values.sidecar.enabled }}
+        - name: google-group-sync
+          image: "{{ .Values.sidecar.image.repository }}:{{ .Values.sidecar.image.tag }}"
+          env:
+            {{- range $key, $value := .Values.sidecar.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          ports:
+            - name: groups
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7070
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          volumeMounts:
+            {{- if .Values.sidecar.saKey.secretName }}
+            - name: google-sa-key
+              mountPath: /etc/secrets
+              readOnly: true
+            {{- end }}
+        {{- end }}
+      volumes:
+        {{- if .Values.rules }}
+        - name: rules
+          configMap:
+            name: {{ include "zitadel-rbac-mapper.fullname" . }}-rules
+        {{- end }}
+        {{- if .Values.zitadelKey.secretName }}
+        - name: zitadel-key
+          secret:
+            secretName: {{ .Values.zitadelKey.secretName }}
+            items:
+              - key: {{ .Values.zitadelKey.secretKey }}
+                path: {{ base .Values.zitadelKey.mountPath }}
+        {{- end }}
+        {{- if and .Values.sidecar.enabled .Values.sidecar.saKey.secretName }}
+        - name: google-sa-key
+          secret:
+            secretName: {{ .Values.sidecar.saKey.secretName }}
+            items:
+              - key: {{ .Values.sidecar.saKey.secretKey }}
+                path: {{ .Values.sidecar.saKey.secretKey }}
+        {{- end }}

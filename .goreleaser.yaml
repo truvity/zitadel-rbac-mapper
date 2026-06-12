@@ -1,0 +1,94 @@
+project_name: zitadel-rbac-mapper
+
+version: 2
+
+builds:
+  # K8s/local binary.
+  - id: zitadel-rbac-mapper
+    main: ./cmd/zitadel-rbac-mapper
+    binary: zitadel-rbac-mapper
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+
+  # Lambda function binary (named bootstrap — Lambda runtime requirement).
+  - id: zitadel-rbac-mapper-lambda
+    main: ./cmd/zitadel-rbac-mapper-lambda
+    binary: bootstrap
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w -X main.Version={{.Version}}
+
+archives:
+  # Raw binary archive (for manual installs / custom deployments).
+  - id: binary
+    ids:
+      - zitadel-rbac-mapper
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+  # Lambda function ZIP (binary named bootstrap).
+  - id: lambda-zip
+    ids:
+      - zitadel-rbac-mapper-lambda
+    formats: [zip]
+    name_template: "{{ .ProjectName }}_lambda_{{ .Version }}_{{ .Arch }}"
+
+kos:
+  - id: zitadel-rbac-mapper
+    build: zitadel-rbac-mapper
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .IsSnapshot }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    bare: true
+    preserve_import_paths: false
+    base_import_paths: true
+    base_image: gcr.io/distroless/static:nonroot
+    sbom: none
+    labels:
+      org.opencontainers.image.title: zitadel-rbac-mapper
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.source: https://github.com/truvity/zitadel-rbac-mapper
+
+release:
+  github:
+    owner: truvity
+    name: zitadel-rbac-mapper
+  header: |
+    ## Zitadel RBAC Mapper {{ .Tag }}
+
+    Docker image: `ghcr.io/truvity/zitadel-rbac-mapper:{{ .Version }}`
+    Helm chart: `oci://ghcr.io/truvity/charts/zitadel-rbac-mapper:{{ .Version }}`
+
+changelog:
+  use: github
+  groups:
+    - title: Features
+      regexp: '^feat'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^fix'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"

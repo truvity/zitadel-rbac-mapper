@@ -1,0 +1,79 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/truvity/zitadel-rbac-mapper
+  tag: ""  # defaults to appVersion
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+service:
+  type: ClusterIP
+  port: 8080
+
+healthPort: 7070
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+# Environment variables for the mapper.
+env:
+  GROUPS_RESOLVER_URL: "http://localhost:9090/groups"
+  ZITADEL_DOMAIN: ""
+  ZITADEL_PORT: "443"
+  ZITADEL_PAYLOAD_TYPE: ""
+  RULES_FILE: "/etc/config/rules.yaml"
+  PORT: "8080"
+  HEALTH_PORT: "7070"
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+
+# Secret environment variables (from existing K8s Secret).
+envFrom: []
+# - secretRef:
+#     name: zitadel-rbac-mapper-secrets
+
+# Mount the Zitadel JWT key from a K8s Secret.
+zitadelKey:
+  # Name of the K8s Secret containing the JWT key JSON.
+  secretName: ""
+  # Key in the Secret that holds the JSON content.
+  secretKey: "key.json"
+  # Mount path inside the container.
+  mountPath: "/etc/secrets/zitadel-key.json"
+
+# Mapping rules (YAML content, mounted as ConfigMap).
+rules: []
+# - group: platform-admins@example.com
+#   grants:
+#     - project: infra
+#       roles: [admin]
+# - group: developers@example.com
+#   grants:
+#     - project: infra
+#       roles: [viewer]
+#     - project: monitoring
+#       roles: [viewer]
+
+# Optional google-group-sync sidecar.
+sidecar:
+  enabled: false
+  image:
+    repository: ghcr.io/truvity/google-group-sync
+    tag: "0.4.0"
+  env:
+    GOOGLE_ADMIN_EMAIL: ""
+    GOOGLE_SA_KEY_FILE: "/etc/secrets/google-sa-key.json"
+    PORT: "9090"
+    HEALTH_PORT: "0"
+  # Mount SA key from a K8s Secret.
+  saKey:
+    secretName: ""
+    secretKey: "sa-key.json"

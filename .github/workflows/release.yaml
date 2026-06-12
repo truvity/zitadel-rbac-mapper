@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - uses: jetify-com/devbox-install-action@v0.14.0
+        with:
+          enable-cache: true
+          skip-nix-installation: true
+
+      - uses: ko-build/setup-ko@v0.9
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: GoReleaser
+        run: devbox run -- goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KO_DOCKER_REPO: ghcr.io/truvity
+
+      - name: Package and push Helm chart
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | devbox run -- helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+          devbox run -- helm package charts/zitadel-rbac-mapper --version "$VERSION" --app-version "$VERSION" --destination dist/
+          devbox run -- helm push dist/zitadel-rbac-mapper-${VERSION}.tgz oci://ghcr.io/truvity/charts
