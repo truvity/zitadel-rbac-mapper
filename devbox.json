@@ -5,6 +5,7 @@
     "gopls@latest",
     "goreleaser@latest",
     "govulncheck@latest",
+    "just-lsp@latest",
     "just@latest",
     "ko@latest",
     "kubernetes-helm@latest"
