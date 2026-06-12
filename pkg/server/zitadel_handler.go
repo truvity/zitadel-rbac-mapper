@@ -83,6 +83,11 @@ func NewZitadelWebhookHandler(
 			}
 
 			payloadBytes = verified
+
+			logger.InfoContext(ctx, "JWT payload extracted",
+				slog.Int("payload_len", len(payloadBytes)),
+				slog.String("payload_preview", truncate(string(payloadBytes), 200)),
+			)
 		} else {
 			payloadBytes = body
 		}
@@ -116,6 +121,15 @@ func NewZitadelWebhookHandler(
 		if email == "" {
 			email = payload.User.Username
 		}
+
+		logger.InfoContext(ctx, "webhook dispatching",
+			slog.String("email", email),
+			slog.String("user_id", payload.User.ID),
+			slog.String("username", payload.User.Username),
+			slog.String("event_type", envelope.EventType),
+			slog.String("function", envelope.Function),
+			slog.Bool("has_human", payload.User.Human != nil),
+		)
 
 		// Skip machine users (no @ in identifier).
 		if !strings.Contains(email, "@") {
@@ -264,4 +278,13 @@ func handleZitadelEvent(
 
 	// Zitadel expects 200 for events.
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{})
+}
+
+// truncate returns at most n characters from s.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+
+	return s[:n] + "..."
 }
