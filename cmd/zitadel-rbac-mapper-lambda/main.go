@@ -40,19 +40,19 @@ func main() {
 	}
 }
 
-// loadTokenFromSecretsManager loads the Zitadel API token from Secrets Manager
-// if ZITADEL_API_TOKEN_SECRET_NAME is set and ZITADEL_API_TOKEN is not already set.
+// loadTokenFromSecretsManager loads the Zitadel JWT key JSON from Secrets Manager
+// if ZITADEL_KEY_SECRET_NAME is set and ZITADEL_KEY_JSON is not already set.
 func loadTokenFromSecretsManager(ctx context.Context) error {
-	secretName := os.Getenv("ZITADEL_API_TOKEN_SECRET_NAME")
+	secretName := os.Getenv("ZITADEL_KEY_SECRET_NAME")
 	if secretName == "" {
 		return nil
 	}
 
-	if os.Getenv("ZITADEL_API_TOKEN") != "" {
+	if os.Getenv("ZITADEL_KEY_JSON") != "" {
 		return nil
 	}
 
-	slog.InfoContext(ctx, "loading API token from Secrets Manager", slog.String("secret", secretName))
+	slog.InfoContext(ctx, "loading Zitadel key from Secrets Manager", slog.String("secret", secretName))
 
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
@@ -72,11 +72,11 @@ func loadTokenFromSecretsManager(ctx context.Context) error {
 		return fmt.Errorf("secret %q has no string value", secretName)
 	}
 
-	if err := os.Setenv("ZITADEL_API_TOKEN", *out.SecretString); err != nil {
-		return fmt.Errorf("set ZITADEL_API_TOKEN: %w", err)
+	if err := os.Setenv("ZITADEL_KEY_JSON", *out.SecretString); err != nil {
+		return fmt.Errorf("set ZITADEL_KEY_JSON: %w", err)
 	}
 
-	slog.InfoContext(ctx, "API token loaded from Secrets Manager")
+	slog.InfoContext(ctx, "Zitadel key loaded from Secrets Manager")
 
 	return nil
 }
