@@ -245,6 +245,54 @@
         }
       }
     },
+    "just-lsp@latest": {
+      "last_modified": "2026-05-22T01:51:30Z",
+      "resolved": "github:NixOS/nixpkgs/6dedf69f94d03cbe7bdde106f2d4c23ae2a853bf#just-lsp",
+      "source": "devbox-search",
+      "version": "0.4.5",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/yn1yz3s4mz8c8qiaqq2d2nr7l8f444af-just-lsp-0.4.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/yn1yz3s4mz8c8qiaqq2d2nr7l8f444af-just-lsp-0.4.5"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/akkvf3fapnnyhz5c4bm6k2jv47nhkyhq-just-lsp-0.4.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/akkvf3fapnnyhz5c4bm6k2jv47nhkyhq-just-lsp-0.4.5"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/q32f5n7dl1xpp9pqs1qlijv1rlhjb61v-just-lsp-0.4.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/q32f5n7dl1xpp9pqs1qlijv1rlhjb61v-just-lsp-0.4.5"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/w77741xl49fmb0i6115nlbxn3cx2w65v-just-lsp-0.4.5",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/w77741xl49fmb0i6115nlbxn3cx2w65v-just-lsp-0.4.5"
+        }
+      }
+    },
     "just@latest": {
       "last_modified": "2026-05-21T08:15:18Z",
       "resolved": "github:NixOS/nixpkgs/4a29d733e8a7d5b824c3d8c958a946a9867b3eb2#just",
