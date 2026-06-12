@@ -21,7 +21,7 @@ type (
 		Function  string `json:"function"`
 	}
 
-	// zitadelPayload is the common structure for both function and event payloads.
+	// zitadelPayload is the structure for function payloads (preaccesstoken, preuserinfo).
 	zitadelPayload struct {
 		EventType string      `json:"event_type"`
 		Function  string      `json:"function"`
@@ -36,6 +36,21 @@ type (
 
 	zitadelHuman struct {
 		Email string `json:"email"`
+	}
+
+	// zitadelEventPayload is the structure for event payloads (user.human.added, session.added).
+	// Events have a completely different format from functions.
+	zitadelEventPayload struct {
+		AggregateID   string           `json:"aggregateID"`
+		AggregateType string           `json:"aggregateType"`
+		EventType     string           `json:"event_type"`
+		UserID        string           `json:"userID"`
+		EventData     zitadelEventData `json:"event_payload"`
+	}
+
+	zitadelEventData struct {
+		Email    string `json:"email"`
+		UserName string `json:"userName"`
 	}
 
 	// appendClaim is a single claim to append to the token.
@@ -92,7 +107,7 @@ func NewZitadelWebhookHandler(
 			payloadBytes = body
 		}
 
-		// Detect payload type.
+		// Dispatch based on type.
 		var envelope zitadelEnvelope
 		if err := json.Unmarshal(payloadBytes, &envelope); err != nil {
 			logger.ErrorContext(ctx, "failed to parse webhook envelope", slog.Any("error", err))
@@ -102,58 +117,74 @@ func NewZitadelWebhookHandler(
 			})
 		}
 
-		// Parse the full payload.
-		var payload zitadelPayload
-		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-			logger.ErrorContext(ctx, "failed to parse webhook payload", slog.Any("error", err))
+		switch {
+		case envelope.EventType != "":
+			// Event payload — different structure (userID, event_payload.email).
+			var eventPayload zitadelEventPayload
+			if err := json.Unmarshal(payloadBytes, &eventPayload); err != nil {
+				logger.ErrorContext(ctx, "failed to parse event payload", slog.Any("error", err))
 
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "invalid webhook body",
-			})
-		}
-
-		// Extract email.
-		email := ""
-		if payload.User.Human != nil {
-			email = payload.User.Human.Email
-		}
-
-		if email == "" {
-			email = payload.User.Username
-		}
-
-		logger.InfoContext(ctx, "webhook dispatching",
-			slog.String("email", email),
-			slog.String("user_id", payload.User.ID),
-			slog.String("username", payload.User.Username),
-			slog.String("event_type", envelope.EventType),
-			slog.String("function", envelope.Function),
-			slog.Bool("has_human", payload.User.Human != nil),
-		)
-
-		// Skip machine users (no @ in identifier).
-		if !strings.Contains(email, "@") {
-			logger.DebugContext(ctx, "skipping non-email identifier (machine user)",
-				slog.String("identifier", email),
-			)
-
-			// Return empty response appropriate for the payload type.
-			if envelope.EventType != "" {
 				return c.Status(fiber.StatusOK).JSON(fiber.Map{})
 			}
 
-			return c.Status(fiber.StatusOK).JSON(setClaimsResponse{
-				AppendClaims: []*appendClaim{
-					{Key: "groups", Value: []string{}},
+			email := eventPayload.EventData.Email
+			if email == "" {
+				email = eventPayload.EventData.UserName
+			}
+
+			logger.InfoContext(ctx, "webhook dispatching event",
+				slog.String("event_type", eventPayload.EventType),
+				slog.String("user_id", eventPayload.UserID),
+				slog.String("email", email),
+			)
+
+			if email == "" || !strings.Contains(email, "@") {
+				return c.Status(fiber.StatusOK).JSON(fiber.Map{})
+			}
+
+			return handleZitadelEvent(c, logger, res, m, syncer, projectIDs, zitadelPayload{
+				EventType: eventPayload.EventType,
+				User: zitadelUser{
+					ID:       eventPayload.UserID,
+					Username: email,
+					Human:    &zitadelHuman{Email: email},
 				},
 			})
-		}
-
-		// Dispatch.
-		switch {
-		case envelope.EventType != "":
-			return handleZitadelEvent(c, logger, res, m, syncer, projectIDs, payload)
 		default:
+			// Function payload — parse user from nested structure.
+			var payload zitadelPayload
+			if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+				logger.ErrorContext(ctx, "failed to parse function payload", slog.Any("error", err))
+
+				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+					"error": "invalid webhook body",
+				})
+			}
+
+			email := ""
+			if payload.User.Human != nil {
+				email = payload.User.Human.Email
+			}
+
+			if email == "" {
+				email = payload.User.Username
+			}
+
+			logger.InfoContext(ctx, "webhook dispatching function",
+				slog.String("email", email),
+				slog.String("user_id", payload.User.ID),
+				slog.String("function", payload.Function),
+				slog.Bool("has_human", payload.User.Human != nil),
+			)
+
+			if !strings.Contains(email, "@") {
+				return c.Status(fiber.StatusOK).JSON(setClaimsResponse{
+					AppendClaims: []*appendClaim{
+						{Key: "groups", Value: []string{}},
+					},
+				})
+			}
+
 			return handleZitadelToken(c, logger, res, email)
 		}
 	}
