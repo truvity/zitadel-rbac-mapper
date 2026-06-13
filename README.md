@@ -209,6 +209,23 @@ just test-integration # run integration tests (requires real Zitadel)
 just check            # build + test + lint + vuln
 ```
 
+### Integration Test Setup
+
+```bash
+# Store Zitadel JWT key in system keyring
+secret-tool store --label='zitadel-rbac-mapper jwt-key' \
+  service zitadel-rbac-mapper username jwt-key < /path/to/key.json
+
+# Delete the key file after storing (don't leave secrets on disk)
+rm /path/to/key.json
+
+# Verify it's stored correctly
+secret-tool lookup service zitadel-rbac-mapper username jwt-key | head -c 20
+
+# Create config (~/.config/zitadel-rbac-mapper/config.yaml)
+# See tests/integration/README.md for required fields
+```
+
 ## Related
 
 - [truvity/google-group-sync](https://github.com/truvity/google-group-sync) — Google Workspace group membership resolver
