@@ -12,6 +12,8 @@
 // Store key:
 //
 //	secret-tool store --label='zitadel-rbac-mapper jwt-key' service zitadel-rbac-mapper username jwt-key < /path/to/key.json
+//	rm /path/to/key.json  # delete the key file after storing to keyring
+//	Verify: secret-tool lookup service zitadel-rbac-mapper username jwt-key | head -c 20
 //
 // Run: go test -tags=integration -v ./tests/integration/...
 package integration
