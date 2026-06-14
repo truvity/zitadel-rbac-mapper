@@ -34,13 +34,13 @@ func NewSyncAllHandler(
 	userLocks *UserLocks,
 ) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		// Verify API key.
-		key := c.Get("X-Sync-Key")
-		if key != apiKey {
+		// Verify Bearer token.
+		auth := c.Get("Authorization")
+		if auth != "Bearer "+apiKey {
 			return sendProblem(c, fiber.StatusUnauthorized,
 				problemBase+"unauthorized",
 				"Unauthorized",
-				"invalid or missing X-Sync-Key header",
+				"invalid or missing Bearer token",
 			)
 		}
 

@@ -65,16 +65,16 @@ func newMockSyncAllHandler(
 	userLocks *server.UserLocks,
 ) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		// Verify API key.
-		key := c.Get("X-Sync-Key")
-		if key != apiKey {
+		// Verify Bearer token.
+		auth := c.Get("Authorization")
+		if auth != "Bearer "+apiKey {
 			c.Set("Content-Type", "application/problem+json")
 
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
 				"type":   "https://github.com/truvity/zitadel-rbac-mapper/problems/unauthorized",
 				"title":  "Unauthorized",
 				"status": 401,
-				"detail": "invalid or missing X-Sync-Key header",
+				"detail": "invalid or missing Bearer token",
 			})
 		}
 
@@ -155,7 +155,7 @@ func TestSyncAll_Success(t *testing.T) {
 	app := newSyncAllTestApp(t, res, syncer, rules, "test-key")
 
 	req := httptest.NewRequest("POST", "/sync", http.NoBody)
-	req.Header.Set("X-Sync-Key", "test-key")
+	req.Header.Set("Authorization", "Bearer test-key")
 
 	resp, err := app.Test(req)
 	if err != nil {
@@ -190,7 +190,7 @@ func TestSyncAll_Unauthorized(t *testing.T) {
 	app := newSyncAllTestApp(t, res, syncer, rules, "correct-key")
 
 	req := httptest.NewRequest("POST", "/sync", http.NoBody)
-	req.Header.Set("X-Sync-Key", "wrong-key")
+	req.Header.Set("Authorization", "Bearer wrong-key")
 
 	resp, err := app.Test(req)
 	if err != nil {
@@ -243,7 +243,7 @@ func TestSyncAll_SkipsMachineUsers(t *testing.T) {
 	app := newSyncAllTestApp(t, res, syncer, rules, "test-key")
 
 	req := httptest.NewRequest("POST", "/sync", http.NoBody)
-	req.Header.Set("X-Sync-Key", "test-key")
+	req.Header.Set("Authorization", "Bearer test-key")
 
 	resp, err := app.Test(req)
 	if err != nil {
@@ -280,7 +280,7 @@ func TestSyncAll_ResolverError_SkipsUser(t *testing.T) {
 	app := newSyncAllTestApp(t, res, syncer, rules, "test-key")
 
 	req := httptest.NewRequest("POST", "/sync", http.NoBody)
-	req.Header.Set("X-Sync-Key", "test-key")
+	req.Header.Set("Authorization", "Bearer test-key")
 
 	resp, err := app.Test(req)
 	if err != nil {
