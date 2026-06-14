@@ -2,13 +2,13 @@
 package resolver
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -19,16 +19,18 @@ type GroupsResolver interface {
 }
 
 // HTTPResolver calls a remote groups resolver endpoint (e.g., google-group-sync).
+// Uses GET /users/{email}/groups REST API.
 type HTTPResolver struct {
-	url    string
-	client *http.Client
-	logger *slog.Logger
+	baseURL string
+	client  *http.Client
+	logger  *slog.Logger
 }
 
 // NewHTTPResolver creates a new HTTP-based groups resolver.
-func NewHTTPResolver(logger *slog.Logger, url string) *HTTPResolver {
+// baseURL is the base URL of the google-group-sync service (e.g., http://localhost:9090).
+func NewHTTPResolver(logger *slog.Logger, baseURL string) *HTTPResolver {
 	return &HTTPResolver{
-		url: url,
+		baseURL: baseURL,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -36,29 +38,20 @@ func NewHTTPResolver(logger *slog.Logger, url string) *HTTPResolver {
 	}
 }
 
-type resolveRequest struct {
-	Email string `json:"email"`
-}
-
 type resolveResponse struct {
 	Groups []string `json:"groups"`
 }
 
-// ResolveGroups calls the groups resolver service to resolve memberships.
+// ResolveGroups calls GET /users/{email}/groups on the groups resolver service.
 func (r *HTTPResolver) ResolveGroups(ctx context.Context, email string) ([]string, error) {
-	body, err := json.Marshal(resolveRequest{Email: email})
-	if err != nil {
-		return nil, fmt.Errorf("marshal request: %w", err)
-	}
+	endpoint := r.baseURL + "/users/" + url.PathEscape(email) + "/groups"
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-
-	r.logger.DebugContext(ctx, "resolving groups", slog.String("email", email), slog.String("url", r.url))
+	r.logger.DebugContext(ctx, "resolving groups", slog.String("email", email), slog.String("url", endpoint))
 
 	resp, err := r.client.Do(req)
 	if err != nil {

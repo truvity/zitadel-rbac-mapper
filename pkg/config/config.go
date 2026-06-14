@@ -2,7 +2,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -17,41 +16,40 @@ type Config struct {
 	// Zitadel connection (grantsync gRPC + JWKS for webhook verification).
 	ZitadelDomain  string // Zitadel instance domain (e.g., "auth.truvity.xyz").
 	ZitadelPort    string // Zitadel gRPC port (default: "443").
-	ZitadelKeyFile string // Path to JWT key JSON file (mutually exclusive with ZitadelKeyJSON).
-	ZitadelKeyJSON string // Raw JWT key JSON (mutually exclusive with ZitadelKeyFile).
+	ZitadelKeyJSON string // Raw JWT key JSON (from ZITADEL_KEY_JSON env var).
 
-	// Mapping rules.
-	RulesSource          string // "env" (default), "file", or "metadata".
-	RulesFile            string // Path to rules YAML file (when source=file).
-	RulesJSON            string // Inline rules JSON (when source=env).
-	RulesRefreshInterval string // Metadata refresh interval (default: "5m", when source=metadata).
+	// Sync API key (required).
+	SyncAPIKey string
+
+	// Rules cache TTL.
+	RulesCacheTTL time.Duration
 
 	// Server settings.
 	Port       int
 	HealthPort int
 
 	// Logging.
-	LogLevel  string
 	LogFormat string
 }
 
 // Load reads configuration from environment variables and validates it.
 func Load() (*Config, error) {
-	cfg := &Config{
-		GroupsResolverURL:    os.Getenv("GROUPS_RESOLVER_URL"),
-		ZitadelDomain:        os.Getenv("ZITADEL_DOMAIN"),
-		ZitadelPort:          envOrDefault("ZITADEL_PORT", "443"),
-		ZitadelKeyFile:       os.Getenv("ZITADEL_KEY_FILE"),
-		ZitadelKeyJSON:       os.Getenv("ZITADEL_KEY_JSON"),
-		RulesSource:          envOrDefault("RULES_SOURCE", "env"),
-		RulesFile:            os.Getenv("RULES_FILE"),
-		RulesJSON:            os.Getenv("RULES_JSON"),
-		RulesRefreshInterval: envOrDefault("RULES_REFRESH_INTERVAL", "5m"),
-		LogLevel:             envOrDefault("LOG_LEVEL", "info"),
-		LogFormat:            envOrDefault("LOG_FORMAT", "json"),
+	ttlStr := envOrDefault("RULES_CACHE_TTL", "5m")
+
+	ttl, err := time.ParseDuration(ttlStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid RULES_CACHE_TTL %q: %w", ttlStr, err)
 	}
 
-	var err error
+	cfg := &Config{
+		GroupsResolverURL: envOrDefault("GROUPS_RESOLVER_URL", "http://localhost:9090"),
+		ZitadelDomain:     os.Getenv("ZITADEL_DOMAIN"),
+		ZitadelPort:       envOrDefault("ZITADEL_PORT", "443"),
+		ZitadelKeyJSON:    os.Getenv("ZITADEL_KEY_JSON"),
+		SyncAPIKey:        os.Getenv("SYNC_API_KEY"),
+		RulesCacheTTL:     ttl,
+		LogFormat:         envOrDefault("LOG_FORMAT", "json"),
+	}
 
 	cfg.Port, err = envIntOrDefault("PORT", 8080)
 	if err != nil {
@@ -71,42 +69,16 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if c.GroupsResolverURL == "" {
-		return fmt.Errorf("GROUPS_RESOLVER_URL is required")
-	}
-
 	if c.ZitadelDomain == "" {
 		return fmt.Errorf("ZITADEL_DOMAIN is required")
 	}
 
-	if c.ZitadelKeyFile == "" && c.ZitadelKeyJSON == "" {
-		return fmt.Errorf("either ZITADEL_KEY_FILE or ZITADEL_KEY_JSON is required")
+	if c.ZitadelKeyJSON == "" {
+		return fmt.Errorf("ZITADEL_KEY_JSON is required")
 	}
 
-	if c.ZitadelKeyFile != "" && c.ZitadelKeyJSON != "" {
-		return fmt.Errorf("ZITADEL_KEY_FILE and ZITADEL_KEY_JSON are mutually exclusive")
-	}
-
-	switch c.RulesSource {
-	case "env":
-		if c.RulesJSON == "" {
-			return fmt.Errorf("RULES_JSON is required when RULES_SOURCE=env")
-		}
-
-		if !json.Valid([]byte(c.RulesJSON)) {
-			return fmt.Errorf("RULES_JSON is not valid JSON")
-		}
-	case "file":
-		if c.RulesFile == "" {
-			return fmt.Errorf("RULES_FILE is required when RULES_SOURCE=file")
-		}
-	case "metadata":
-		// No additional config needed — reads from Zitadel Org Metadata via API.
-		if _, err := time.ParseDuration(c.RulesRefreshInterval); err != nil {
-			return fmt.Errorf("invalid RULES_REFRESH_INTERVAL %q: %w", c.RulesRefreshInterval, err)
-		}
-	default:
-		return fmt.Errorf("RULES_SOURCE must be env, file, or metadata (got %q)", c.RulesSource)
+	if c.SyncAPIKey == "" {
+		return fmt.Errorf("SYNC_API_KEY is required")
 	}
 
 	return nil

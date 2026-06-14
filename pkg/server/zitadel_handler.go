@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -56,20 +57,17 @@ type (
 // via a restCall target with JWT payload type. It:
 //  1. Verifies the JWT signature using the instance JWKS
 //  2. Extracts the user email from the payload
-//  3. Resolves Google Workspace groups via the groups resolver (localhost:9090)
-//  4. Maps groups to desired grants using the configured rules
+//  3. Resolves Google Workspace groups via the groups resolver
+//  4. Maps groups to desired grants using the cached rules
 //  5. Syncs UserGrants in Zitadel (idempotent add/update/remove)
 //  6. Returns append_claims with a "groups" claim containing the group emails
-//
-// The grant sync runs on every preuserinfo call (once per OIDC login flow).
-// It is idempotent — if grants are already correct, no API calls are made.
 func NewZitadelWebhookHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
 	getMapper func() *mapper.Mapper,
 	syncer *grantsync.Syncer,
-	projectIDs map[string]string,
 	jwtVerifier *zitadeljwt.Verifier,
+	userLocks *UserLocks,
 ) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		ctx := c.Context()
@@ -142,48 +140,10 @@ func NewZitadelWebhookHandler(
 
 		// Sync grants (idempotent — no-op if already correct).
 		if syncer != nil && userID != "" && len(groups) > 0 {
-			mapperGrants := getMapper().MapGroups(groups)
-
-			desired := make([]grantsync.DesiredGrant, 0, len(mapperGrants))
-			for _, mg := range mapperGrants {
-				var pid string
-				if projectIDs != nil {
-					id, ok := projectIDs[mg.Project]
-					if !ok {
-						continue
-					}
-
-					pid = id
-				} else {
-					pid = mg.Project
-				}
-
-				desired = append(desired, grantsync.DesiredGrant{
-					ProjectID: pid,
-					RoleKeys:  mg.Roles,
-				})
-			}
-
-			// Pass org ID from the function payload to scope Management API calls.
-			var orgID string
-			if payload.Org != nil {
-				orgID = payload.Org.ID
-			}
-
-			result, syncErr := syncer.Sync(ctx, userID, desired, orgID)
-			if syncErr != nil {
-				logger.WarnContext(ctx, "grant sync failed",
-					slog.String("user_id", userID),
-					slog.Any("error", syncErr),
-				)
-			} else if result.Added > 0 || result.Updated > 0 || result.Removed > 0 {
-				logger.InfoContext(ctx, "grants synced",
-					slog.String("user_id", userID),
-					slog.Int("added", result.Added),
-					slog.Int("updated", result.Updated),
-					slog.Int("removed", result.Removed),
-				)
-			}
+			// Acquire per-user lock.
+			userLocks.Lock(userID)
+			syncGrants(ctx, logger, getMapper, syncer, userID, groups, payload.Org)
+			userLocks.Unlock(userID)
 		}
 
 		logger.InfoContext(ctx, "returning groups claim",
@@ -195,5 +155,47 @@ func NewZitadelWebhookHandler(
 				{Key: "groups", Value: groups},
 			},
 		})
+	}
+}
+
+// syncGrants maps groups to desired grants and syncs them for the user.
+func syncGrants(
+	ctx context.Context,
+	logger *slog.Logger,
+	getMapper func() *mapper.Mapper,
+	syncer *grantsync.Syncer,
+	userID string,
+	groups []string,
+	org *zitadelOrg,
+) {
+	mapperGrants := getMapper().MapGroups(groups)
+
+	desired := make([]grantsync.DesiredGrant, 0, len(mapperGrants))
+	for _, mg := range mapperGrants {
+		desired = append(desired, grantsync.DesiredGrant{
+			ProjectID: mg.Project,
+			RoleKeys:  mg.Roles,
+		})
+	}
+
+	// Pass org ID from the function payload to scope Management API calls.
+	var orgID string
+	if org != nil {
+		orgID = org.ID
+	}
+
+	result, syncErr := syncer.Sync(ctx, userID, desired, orgID)
+	if syncErr != nil {
+		logger.WarnContext(ctx, "grant sync failed",
+			slog.String("user_id", userID),
+			slog.Any("error", syncErr),
+		)
+	} else if result.Added > 0 || result.Updated > 0 || result.Removed > 0 {
+		logger.InfoContext(ctx, "grants synced",
+			slog.String("user_id", userID),
+			slog.Int("added", result.Added),
+			slog.Int("updated", result.Updated),
+			slog.Int("removed", result.Removed),
+		)
 	}
 }

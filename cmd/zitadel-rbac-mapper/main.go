@@ -45,24 +45,23 @@ Usage: zitadel-rbac-mapper [--version] [--help]
 
 Starts an HTTP server that receives sync requests, resolves user groups via
 an external resolver (google-group-sync), maps groups to desired grants using
-configured rules, and syncs UserGrants in Zitadel.
+RBAC rules from Zitadel Org Metadata, and syncs UserGrants in Zitadel.
 
 Environment variables:
-  ZITADEL_PAYLOAD_TYPE    Payload verification: jwt, hmac, or empty (default: "")
-  ZITADEL_JWKS_URL        JWKS URL for JWT verification (required if type=jwt)
-  ZITADEL_SIGNING_KEY     HMAC signing key (required if type=hmac)
-  GROUPS_RESOLVER_URL     URL of groups resolver (required, e.g., http://localhost:9090/groups)
-  ZITADEL_API_DOMAIN      Zitadel instance domain (required)
-  ZITADEL_API_TOKEN       Zitadel API token / PAT (required)
-  RULES_FILE              Path to rules YAML file (mutually exclusive with RULES_JSON)
-  RULES_JSON              Inline rules JSON (mutually exclusive with RULES_FILE)
+  ZITADEL_DOMAIN          Zitadel instance domain (required)
+  ZITADEL_PORT            Zitadel gRPC port (default: "443")
+  ZITADEL_KEY_JSON        JWT key JSON for service account auth (required)
+  ZITADEL_KEY_SECRET_NAME AWS Secrets Manager name (Lambda only, sets ZITADEL_KEY_JSON)
+  GROUPS_RESOLVER_URL     URL of groups resolver (default: http://localhost:9090)
+  SYNC_API_KEY            API key for POST /sync endpoint (required)
+  RULES_CACHE_TTL         TTL for rules cache (default: "5m")
   PORT                    HTTP server port (default: 8080)
   HEALTH_PORT             Health probe port (default: 7070)
-  LOG_LEVEL               Log level: debug|info|warn|error (default: info)
   LOG_FORMAT              Log format: json|text (default: json)
 
 API:
-  POST /sync    Sync user grants (JSON body: {"userId": "...", "email": "user@example.com"})
-  GET  /health  Health check (200 OK)
+  POST /webhook  Zitadel Actions V2 webhook (JWT verified, single-user login-time sync)
+  POST /sync     Full reconciliation (X-Sync-Key verified, reload rules + sync all users)
+  GET  /health   Health check (200 OK)
 `)
 }

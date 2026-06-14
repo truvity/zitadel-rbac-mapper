@@ -135,19 +135,29 @@ func TestMapGroups_DuplicateRoles(t *testing.T) {
 	}
 }
 
-func TestLoadRulesFromJSON(t *testing.T) {
-	jsonData := `[{"group":"admins@example.com","grants":[{"project":"infra","roles":["admin"]}]}]`
-
-	rules, err := LoadRulesFromJSON(jsonData)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestMapGroups_EmptyGroups(t *testing.T) {
+	rules := []Rule{
+		{
+			Group: "admins@example.com",
+			Grants: []Grant{
+				{Project: "infra", Roles: []string{"admin"}},
+			},
+		},
 	}
 
-	if len(rules) != 1 {
-		t.Fatalf("got %d rules, want 1", len(rules))
-	}
+	m := NewMapper(rules)
+	result := m.MapGroups([]string{})
 
-	if rules[0].Group != "admins@example.com" {
-		t.Errorf("got group %q, want admins@example.com", rules[0].Group)
+	if len(result) != 0 {
+		t.Errorf("got %d grants, want 0 for empty groups", len(result))
+	}
+}
+
+func TestMapGroups_NilRules(t *testing.T) {
+	m := NewMapper(nil)
+	result := m.MapGroups([]string{"admins@example.com"})
+
+	if len(result) != 0 {
+		t.Errorf("got %d grants, want 0 for nil rules", len(result))
 	}
 }

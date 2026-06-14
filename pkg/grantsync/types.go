@@ -3,15 +3,15 @@ package grantsync
 // DesiredGrant represents a grant that should exist for a user.
 // ProjectID is the Zitadel project ID (not name).
 type DesiredGrant struct {
-	ProjectID string
-	RoleKeys  []string
+	ProjectID string   `json:"projectId"`
+	RoleKeys  []string `json:"roleKeys"`
 }
 
 // SyncResult reports what changed during a Sync operation.
 type SyncResult struct {
-	Added   int
-	Updated int
-	Removed int
+	Added   int `json:"added"`
+	Updated int `json:"updated"`
+	Removed int `json:"removed"`
 }
 
 // Config holds connection parameters for the Zitadel instance.
@@ -22,11 +22,6 @@ type Config struct {
 	// Port is the gRPC port (typically "443" for cloud instances).
 	Port string
 
-	// KeyPath is the path to the JWT key JSON file for service account authentication.
-	// Mutually exclusive with KeyJSON.
-	KeyPath string
-
 	// KeyJSON is the raw JWT key JSON content for service account authentication.
-	// Mutually exclusive with KeyPath.
 	KeyJSON string
 }

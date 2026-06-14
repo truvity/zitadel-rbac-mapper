@@ -1,24 +1,16 @@
 // Package mapper provides the rules engine that maps groups to desired Zitadel UserGrants.
 package mapper
 
-import (
-	"encoding/json"
-	"fmt"
-	"os"
-
-	"gopkg.in/yaml.v3"
-)
-
 // Rule maps a single group to one or more grants.
 type Rule struct {
-	Group  string  `json:"group" yaml:"group"`
-	Grants []Grant `json:"grants" yaml:"grants"`
+	Group  string  `json:"group"`
+	Grants []Grant `json:"grants"`
 }
 
 // Grant represents a desired Zitadel UserGrant (project + roles).
 type Grant struct {
-	Project string   `json:"project" yaml:"project"`
-	Roles   []string `json:"roles" yaml:"roles"`
+	Project string   `json:"project"`
+	Roles   []string `json:"roles"`
 }
 
 // DesiredGrant is the resolved output for a specific user: project + aggregated roles.
@@ -35,31 +27,6 @@ type Mapper struct {
 // NewMapper creates a mapper with the given rules.
 func NewMapper(rules []Rule) *Mapper {
 	return &Mapper{rules: rules}
-}
-
-// LoadRulesFromFile reads rules from a YAML file.
-func LoadRulesFromFile(path string) ([]Rule, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // path comes from trusted RULES_FILE env var
-	if err != nil {
-		return nil, fmt.Errorf("read rules file %q: %w", path, err)
-	}
-
-	var rules []Rule
-	if err := yaml.Unmarshal(data, &rules); err != nil {
-		return nil, fmt.Errorf("parse rules file %q: %w", path, err)
-	}
-
-	return rules, nil
-}
-
-// LoadRulesFromJSON parses rules from a JSON string.
-func LoadRulesFromJSON(data string) ([]Rule, error) {
-	var rules []Rule
-	if err := json.Unmarshal([]byte(data), &rules); err != nil {
-		return nil, fmt.Errorf("parse rules JSON: %w", err)
-	}
-
-	return rules, nil
 }
 
 // MapGroups takes a list of group emails and returns the desired grants

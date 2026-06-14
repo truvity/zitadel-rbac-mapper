@@ -11,17 +11,13 @@ import (
 
 func TestHTTPResolver_ResolveGroups(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("got method %s, want POST", r.Method)
+		if r.Method != http.MethodGet {
+			t.Errorf("got method %s, want GET", r.Method)
 		}
 
-		var req resolveRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-
-		if req.Email != "user@example.com" {
-			t.Errorf("got email %q, want user@example.com", req.Email)
+		expectedPath := "/users/user@example.com/groups"
+		if r.URL.Path != expectedPath {
+			t.Errorf("got path %q, want %q", r.URL.Path, expectedPath)
 		}
 
 		resp := resolveResponse{Groups: []string{"admins@example.com", "developers@example.com"}}

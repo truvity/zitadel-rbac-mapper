@@ -14,7 +14,6 @@ import (
 	"github.com/zitadel/zitadel-go/v3/pkg/client/middleware"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object"
-	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/project"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user"
 	"github.com/zitadel/zitadel-go/v3/pkg/zitadel"
 )
@@ -31,13 +30,6 @@ func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) 
 	var keyFile *client.KeyFile
 
 	switch {
-	case cfg.KeyPath != "":
-		var err error
-
-		keyFile, err = client.ConfigFromKeyFile(cfg.KeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("grantsync: read key file: %w", err)
-		}
 	case cfg.KeyJSON != "":
 		var err error
 
@@ -46,7 +38,7 @@ func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) 
 			return nil, fmt.Errorf("grantsync: parse key JSON: %w", err)
 		}
 	default:
-		return nil, fmt.Errorf("grantsync: either KeyPath or KeyJSON must be set")
+		return nil, fmt.Errorf("grantsync: KeyJSON must be set")
 	}
 
 	authOption := client.WithAuth(client.AuthenticationJWTProfile(
@@ -171,40 +163,73 @@ func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant
 		}
 	}
 
-	s.logger.InfoContext(ctx, "sync complete",
-		slog.String("user_id", userID),
-		slog.Int("added", result.Added),
-		slog.Int("updated", result.Updated),
-		slog.Int("removed", result.Removed),
-	)
-
 	return &result, nil
 }
 
-// LookupProjectID resolves a project name to its ID.
-func (s *Syncer) LookupProjectID(ctx context.Context, name string) (string, error) {
-	resp, err := s.api.ManagementService().ListProjects(ctx, &management.ListProjectsRequest{ //nolint:staticcheck // v2 API not stable yet
-		Query: &object.ListQuery{Limit: 100},
-		Queries: []*project.ProjectQuery{
-			{
-				Query: &project.ProjectQuery_NameQuery{
-					NameQuery: &project.ProjectNameQuery{
-						Name:   name,
-						Method: object.TextQueryMethod_TEXT_QUERY_METHOD_EQUALS,
+// UserInfo holds basic user information for sync-all operations.
+type UserInfo struct {
+	ID    string
+	Email string
+}
+
+// ListUsers returns all human users in the organization.
+func (s *Syncer) ListUsers(ctx context.Context) ([]UserInfo, error) {
+	var allUsers []UserInfo
+
+	var offset uint64
+
+	const pageSize = 100
+
+	for {
+		resp, err := s.api.ManagementService().ListUsers(ctx, &management.ListUsersRequest{ //nolint:staticcheck // v2 API not stable yet
+			Query: &object.ListQuery{
+				Limit:  pageSize,
+				Offset: offset,
+			},
+			Queries: []*user.SearchQuery{
+				{
+					Query: &user.SearchQuery_TypeQuery{
+						TypeQuery: &user.TypeQuery{
+							Type: user.Type_TYPE_HUMAN,
+						},
 					},
 				},
 			},
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("list projects: %w", err)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list users (offset %d): %w", offset, err)
+		}
+
+		for _, u := range resp.GetResult() {
+			email := ""
+			if u.GetHuman() != nil && u.GetHuman().GetEmail() != nil {
+				email = u.GetHuman().GetEmail().GetEmail()
+			}
+
+			if email == "" {
+				email = u.GetUserName()
+			}
+
+			allUsers = append(allUsers, UserInfo{
+				ID:    u.GetId(),
+				Email: email,
+			})
+		}
+
+		if uint64(len(resp.GetResult())) < pageSize {
+			break
+		}
+
+		offset += pageSize
 	}
 
-	if len(resp.GetResult()) == 0 {
-		return "", fmt.Errorf("project %q not found", name)
-	}
+	return allUsers, nil
+}
 
-	return resp.GetResult()[0].GetId(), nil
+// Client returns the underlying Zitadel API client.
+// Used by the metadata loader to read Org Metadata via the same connection.
+func (s *Syncer) Client() *client.Client {
+	return s.api
 }
 
 // listUserGrants returns all active grants for a user.
@@ -242,10 +267,4 @@ func rolesEqual(a, b []string) bool {
 	sort.Strings(bSorted)
 
 	return strings.Join(aSorted, ",") == strings.Join(bSorted, ",")
-}
-
-// Client returns the underlying Zitadel API client.
-// Used by the metadata loader to read Org Metadata via the same connection.
-func (s *Syncer) Client() *client.Client {
-	return s.api
 }

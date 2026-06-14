@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
@@ -19,6 +20,27 @@ import (
 type Config struct {
 	Port       int
 	HealthPort int
+	SyncAPIKey string
+}
+
+// UserLocks provides per-user mutexes to prevent race conditions
+// when scheduled sync-all and login webhook fire for the same user.
+type UserLocks struct {
+	locks sync.Map
+}
+
+// Lock acquires the mutex for the given userID.
+func (ul *UserLocks) Lock(userID string) {
+	mu, _ := ul.locks.LoadOrStore(userID, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+}
+
+// Unlock releases the mutex for the given userID.
+func (ul *UserLocks) Unlock(userID string) {
+	mu, ok := ul.locks.Load(userID)
+	if ok {
+		mu.(*sync.Mutex).Unlock()
+	}
 }
 
 // Run starts the HTTP server and blocks until the context is canceled.
@@ -27,37 +49,30 @@ func Run(
 	logger *slog.Logger,
 	cfg Config,
 	res resolver.GroupsResolver,
-	m *mapper.Mapper,
 	metadataLoader *mapper.MetadataLoader,
 	syncer *grantsync.Syncer,
-	projectIDs map[string]string,
 	jwtVerifier *zitadeljwt.Verifier,
 ) error {
 	app := fiber.New(fiber.Config{
 		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
+		WriteTimeout: 60 * time.Second, // sync-all can take a while
 		IdleTimeout:  60 * time.Second,
 	})
 
 	// Request logging middleware.
 	app.Use(slogfiber.New(logger))
 
-	// Create a function that returns the current mapper (supports metadata refresh).
+	// Shared per-user lock map.
+	userLocks := &UserLocks{}
+
+	// Create a function that returns the current mapper from cached rules.
 	getMapper := func() *mapper.Mapper {
-		if m != nil {
-			return m
-		}
-
-		if metadataLoader != nil {
-			return mapper.NewMapper(metadataLoader.Rules())
-		}
-
-		return mapper.NewMapper(nil)
+		return mapper.NewMapper(metadataLoader.Rules(ctx))
 	}
 
 	// Routes.
-	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, getMapper, syncer, projectIDs, jwtVerifier))
-	app.Post("/sync", NewSyncHandler(logger, res, getMapper, syncer, projectIDs))
+	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, getMapper, syncer, jwtVerifier, userLocks))
+	app.Post("/sync", NewSyncAllHandler(logger, res, metadataLoader, syncer, cfg.SyncAPIKey, userLocks))
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusOK)
 	})

@@ -14,25 +14,26 @@ import (
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object"
 )
 
-// MetadataLoader loads rules from Zitadel Org Metadata and keeps them refreshed.
+// MetadataLoader loads rules from Zitadel Org Metadata with TTL-based caching.
 // Metadata keys follow the format: rbac/{cluster-name}/{role-key}
-// Values are base64-encoded comma-delimited Google Group emails.
+// Values are raw bytes containing comma-delimited Google Group emails.
 type MetadataLoader struct {
-	api      *client.Client
-	logger   *slog.Logger
-	interval time.Duration
+	api    *client.Client
+	logger *slog.Logger
+	ttl    time.Duration
 
-	mu    sync.RWMutex
-	rules []Rule
+	mu       sync.RWMutex
+	rules    []Rule
+	loadedAt time.Time
 }
 
 // NewMetadataLoader creates a loader that reads RBAC rules from Org Metadata.
-// It performs an initial load and starts a background refresh goroutine.
-func NewMetadataLoader(ctx context.Context, logger *slog.Logger, api *client.Client, interval time.Duration) (*MetadataLoader, error) {
+// It performs an initial load and fails hard if metadata can't be read at startup.
+func NewMetadataLoader(ctx context.Context, logger *slog.Logger, api *client.Client, ttl time.Duration) (*MetadataLoader, error) {
 	ml := &MetadataLoader{
-		api:      api,
-		logger:   logger,
-		interval: interval,
+		api:    api,
+		logger: logger,
+		ttl:    ttl,
 	}
 
 	// Initial load — fail hard if metadata can't be read at startup.
@@ -42,52 +43,68 @@ func NewMetadataLoader(ctx context.Context, logger *slog.Logger, api *client.Cli
 	}
 
 	ml.rules = rules
+	ml.loadedAt = time.Now()
+
 	logger.InfoContext(ctx, "loaded RBAC rules from Org Metadata",
 		slog.Int("rules", len(rules)),
 	)
 
-	// Start background refresh.
-	go ml.refreshLoop(ctx)
-
 	return ml, nil
 }
 
-// Rules returns the current set of rules (thread-safe snapshot).
-func (ml *MetadataLoader) Rules() []Rule {
+// Rules returns the current cached rules. If the cache has expired,
+// it reloads in the background (returning stale data on error).
+// This is the fast path used by /webhook.
+func (ml *MetadataLoader) Rules(ctx context.Context) []Rule {
 	ml.mu.RLock()
-	defer ml.mu.RUnlock()
+	rules := ml.rules
+	expired := time.Since(ml.loadedAt) > ml.ttl
+	ml.mu.RUnlock()
 
-	return ml.rules
+	if !expired {
+		return rules
+	}
+
+	// Cache expired — attempt reload.
+	newRules, err := ml.loadFromMetadata(ctx)
+	if err != nil {
+		ml.logger.WarnContext(ctx, "failed to refresh rules from metadata, using cached rules",
+			slog.Any("error", err),
+		)
+
+		return rules
+	}
+
+	ml.mu.Lock()
+	ml.rules = newRules
+	ml.loadedAt = time.Now()
+	ml.mu.Unlock()
+
+	ml.logger.DebugContext(ctx, "refreshed RBAC rules from Org Metadata",
+		slog.Int("rules", len(newRules)),
+	)
+
+	return newRules
 }
 
-// refreshLoop periodically reloads rules from metadata.
-func (ml *MetadataLoader) refreshLoop(ctx context.Context) {
-	ticker := time.NewTicker(ml.interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			rules, err := ml.loadFromMetadata(ctx)
-			if err != nil {
-				ml.logger.ErrorContext(ctx, "failed to refresh rules from metadata, keeping previous rules",
-					slog.Any("error", err),
-				)
-
-				continue
-			}
-
-			ml.mu.Lock()
-			ml.rules = rules
-			ml.mu.Unlock()
-
-			ml.logger.DebugContext(ctx, "refreshed RBAC rules from Org Metadata",
-				slog.Int("rules", len(rules)),
-			)
-		}
+// ForceRefresh reloads rules from metadata, ignoring the TTL cache.
+// Used by /sync to ensure fresh rules before full reconciliation.
+func (ml *MetadataLoader) ForceRefresh(ctx context.Context) ([]Rule, error) {
+	rules, err := ml.loadFromMetadata(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("force refresh metadata: %w", err)
 	}
+
+	ml.mu.Lock()
+	ml.rules = rules
+	ml.loadedAt = time.Now()
+	ml.mu.Unlock()
+
+	ml.logger.InfoContext(ctx, "force-refreshed RBAC rules from Org Metadata",
+		slog.Int("rules", len(rules)),
+	)
+
+	return rules, nil
 }
 
 // loadFromMetadata reads all rbac/* metadata entries and converts them to rules.
@@ -110,10 +127,9 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 
 	// Parse metadata entries into rules.
 	// Key format: "rbac/{cluster-name}/{role-key}"
-	// Value: base64("email1,email2")
+	// Value: raw bytes = "email1,email2"
 	//
 	// We invert to: group → [{project: cluster-name, roles: [role-key]}]
-	// (the mapper works with group → grants, not cluster/role → groups)
 	type grantEntry struct {
 		project string
 		role    string
@@ -140,9 +156,7 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 		cluster := parts[0]
 		role := parts[1]
 
-		// Decode value: bytes → comma-separated emails.
-		// The Zitadel API returns value as raw bytes (Pulumi encodes as base64 at the provider level,
-		// but the API gives us the original bytes).
+		// Value is raw bytes containing comma-separated emails.
 		valueBytes := entry.GetValue()
 
 		emails := strings.Split(string(valueBytes), ",")
@@ -160,7 +174,7 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 	}
 
 	// Convert to rules format: one Rule per group, aggregating grants per project.
-	var rules []Rule
+	rules := make([]Rule, 0, len(groupGrants))
 
 	for group, entries := range groupGrants {
 		// Aggregate roles per project.
@@ -169,7 +183,7 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 			projectRoles[e.project] = append(projectRoles[e.project], e.role)
 		}
 
-		var grants []Grant
+		grants := make([]Grant, 0, len(projectRoles))
 		for project, roles := range projectRoles {
 			grants = append(grants, Grant{
 				Project: project,
