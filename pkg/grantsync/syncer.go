@@ -14,6 +14,7 @@ import (
 	"github.com/zitadel/zitadel-go/v3/pkg/client/middleware"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object"
+	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/project"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user"
 	"github.com/zitadel/zitadel-go/v3/pkg/zitadel"
 )
@@ -267,4 +268,30 @@ func rolesEqual(a, b []string) bool {
 	sort.Strings(bSorted)
 
 	return strings.Join(aSorted, ",") == strings.Join(bSorted, ",")
+}
+
+// LookupProjectID resolves a project name to its ID.
+func (s *Syncer) LookupProjectID(ctx context.Context, name string) (string, error) {
+	resp, err := s.api.ManagementService().ListProjects(ctx, &management.ListProjectsRequest{ //nolint:staticcheck // v2 API not stable yet
+		Query: &object.ListQuery{Limit: 100},
+		Queries: []*project.ProjectQuery{
+			{
+				Query: &project.ProjectQuery_NameQuery{
+					NameQuery: &project.ProjectNameQuery{
+						Name:   name,
+						Method: object.TextQueryMethod_TEXT_QUERY_METHOD_EQUALS,
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("list projects: %w", err)
+	}
+
+	if len(resp.GetResult()) == 0 {
+		return "", fmt.Errorf("project %q not found", name)
+	}
+
+	return resp.GetResult()[0].GetId(), nil
 }
