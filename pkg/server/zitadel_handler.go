@@ -66,7 +66,7 @@ type (
 func NewZitadelWebhookHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
-	m *mapper.Mapper,
+	getMapper func() *mapper.Mapper,
 	syncer *grantsync.Syncer,
 	projectIDs map[string]string,
 	jwtVerifier *zitadeljwt.Verifier,
@@ -142,7 +142,7 @@ func NewZitadelWebhookHandler(
 
 		// Sync grants (idempotent — no-op if already correct).
 		if syncer != nil && userID != "" && len(groups) > 0 {
-			mapperGrants := m.MapGroups(groups)
+			mapperGrants := getMapper().MapGroups(groups)
 
 			desired := make([]grantsync.DesiredGrant, 0, len(mapperGrants))
 			for _, mg := range mapperGrants {

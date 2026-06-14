@@ -28,6 +28,7 @@ func Run(
 	cfg Config,
 	res resolver.GroupsResolver,
 	m *mapper.Mapper,
+	metadataLoader *mapper.MetadataLoader,
 	syncer *grantsync.Syncer,
 	projectIDs map[string]string,
 	jwtVerifier *zitadeljwt.Verifier,
@@ -41,9 +42,22 @@ func Run(
 	// Request logging middleware.
 	app.Use(slogfiber.New(logger))
 
+	// Create a function that returns the current mapper (supports metadata refresh).
+	getMapper := func() *mapper.Mapper {
+		if m != nil {
+			return m
+		}
+
+		if metadataLoader != nil {
+			return mapper.NewMapper(metadataLoader.Rules())
+		}
+
+		return mapper.NewMapper(nil)
+	}
+
 	// Routes.
-	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, m, syncer, projectIDs, jwtVerifier))
-	app.Post("/sync", NewSyncHandler(logger, res, m, syncer, projectIDs))
+	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, getMapper, syncer, projectIDs, jwtVerifier))
+	app.Post("/sync", NewSyncHandler(logger, res, getMapper, syncer, projectIDs))
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusOK)
 	})

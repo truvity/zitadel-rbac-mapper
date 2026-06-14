@@ -32,7 +32,7 @@ type SyncResponse struct {
 func NewSyncHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
-	m *mapper.Mapper,
+	getMapper func() *mapper.Mapper,
 	syncer *grantsync.Syncer,
 	projectIDs map[string]string,
 ) fiber.Handler {
@@ -73,7 +73,7 @@ func NewSyncHandler(
 
 		// Convert mapper output to grantsync DesiredGrants (resolve project name → ID).
 		// If projectIDs is nil, the rules already contain project IDs directly.
-		mapperGrants := m.MapGroups(groups)
+		mapperGrants := getMapper().MapGroups(groups)
 
 		desired := make([]grantsync.DesiredGrant, 0, len(mapperGrants))
 		for _, mg := range mapperGrants {

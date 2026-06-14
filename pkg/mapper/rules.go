@@ -105,3 +105,8 @@ func (m *Mapper) MapGroups(groups []string) []DesiredGrant {
 
 	return result
 }
+
+// RuleCount returns the number of configured rules.
+func (m *Mapper) RuleCount() int {
+	return len(m.rules)
+}

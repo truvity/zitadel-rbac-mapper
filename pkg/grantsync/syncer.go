@@ -243,3 +243,9 @@ func rolesEqual(a, b []string) bool {
 
 	return strings.Join(aSorted, ",") == strings.Join(bSorted, ",")
 }
+
+// Client returns the underlying Zitadel API client.
+// Used by the metadata loader to read Org Metadata via the same connection.
+func (s *Syncer) Client() *client.Client {
+	return s.api
+}

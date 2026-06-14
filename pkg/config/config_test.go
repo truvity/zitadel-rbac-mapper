@@ -49,13 +49,14 @@ func TestLoad_MutuallyExclusiveRules(t *testing.T) {
 	t.Setenv("GROUPS_RESOLVER_URL", "http://localhost:9090/groups")
 	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
 	t.Setenv("ZITADEL_KEY_JSON", `{"type":"serviceaccount","keyId":"1","key":"k","userId":"u"}`)
-	t.Setenv("RULES_FILE", "/etc/config/rules.yaml")
-	t.Setenv("RULES_JSON", `[{"group":"admins","grants":[{"project":"infra","roles":["admin"]}]}]`)
+	t.Setenv("RULES_SOURCE", "invalid-source")
+	t.Setenv("RULES_FILE", "")
+	t.Setenv("RULES_JSON", "")
 	t.Setenv("ZITADEL_KEY_FILE", "")
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for mutually exclusive RULES_FILE and RULES_JSON")
+		t.Fatal("expected error for invalid RULES_SOURCE")
 	}
 }
 
