@@ -2,6 +2,7 @@ package mapper
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -9,107 +10,168 @@ import (
 	"time"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/client"
+	"github.com/zitadel/zitadel-go/v3/pkg/client/middleware"
+	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/admin"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/metadata"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object"
 )
 
-// MetadataLoader loads rules from Zitadel Org Metadata with TTL-based caching.
-// Metadata keys follow the format: rbac/{cluster-name}/{role-key}
-// Values are raw bytes containing comma-delimited Google Group emails.
+// OrgInfo holds basic organization information.
+type OrgInfo struct {
+	ID   string
+	Name string
+}
+
+// MetadataLoader loads RBAC rules from Zitadel Org Metadata for all organizations.
+// It discovers orgs at startup, loads rbac/* metadata per org, and caches with TTL.
+// Metadata keys: rbac/{cluster-name}/{role-key}
+// Metadata values: base64-encoded comma-delimited Google Group emails.
 type MetadataLoader struct {
 	api    *client.Client
 	logger *slog.Logger
 	ttl    time.Duration
 
 	mu       sync.RWMutex
-	rules    []Rule
+	orgRules map[string][]Rule // orgID → rules
+	orgs     []OrgInfo
 	loadedAt time.Time
 }
 
-// NewMetadataLoader creates a loader that reads RBAC rules from Org Metadata.
-// It performs an initial load and fails hard if metadata can't be read at startup.
+// NewMetadataLoader creates a loader that reads RBAC rules from all organizations.
+// It lists orgs, loads rbac/* metadata per org, and fails if no rules are found anywhere.
 func NewMetadataLoader(ctx context.Context, logger *slog.Logger, api *client.Client, ttl time.Duration) (*MetadataLoader, error) {
 	ml := &MetadataLoader{
-		api:    api,
-		logger: logger,
-		ttl:    ttl,
+		api:      api,
+		logger:   logger,
+		ttl:      ttl,
+		orgRules: make(map[string][]Rule),
 	}
 
-	// Initial load — fail hard if metadata can't be read at startup.
-	rules, err := ml.loadFromMetadata(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("initial metadata load: %w", err)
+	if err := ml.refresh(ctx); err != nil {
+		return nil, fmt.Errorf("initial load: %w", err)
 	}
 
-	ml.rules = rules
-	ml.loadedAt = time.Now()
+	// Verify at least one org has rules.
+	totalRules := 0
+	for _, rules := range ml.orgRules {
+		totalRules += len(rules)
+	}
+
+	if totalRules == 0 {
+		return nil, fmt.Errorf("initial load: zero rules across all orgs (rbac/* metadata entries missing)")
+	}
 
 	logger.InfoContext(ctx, "loaded RBAC rules from Org Metadata",
-		slog.Int("rules", len(rules)),
+		slog.Int("orgs", len(ml.orgs)),
+		slog.Int("total_rules", totalRules),
 	)
 
 	return ml, nil
 }
 
-// Rules returns the current cached rules. If the cache has expired,
-// it reloads in the background (returning stale data on error).
-// This is the fast path used by /webhook.
-func (ml *MetadataLoader) Rules(ctx context.Context) []Rule {
+// Rules returns the rules for a specific organization (thread-safe).
+// Returns nil if the org has no rules.
+func (ml *MetadataLoader) Rules(ctx context.Context, orgID string) []Rule {
+	ml.maybeRefresh(ctx)
+
 	ml.mu.RLock()
-	rules := ml.rules
+	defer ml.mu.RUnlock()
+
+	return ml.orgRules[orgID]
+}
+
+// Orgs returns all discovered organizations.
+func (ml *MetadataLoader) Orgs() []OrgInfo {
+	ml.mu.RLock()
+	defer ml.mu.RUnlock()
+
+	return ml.orgs
+}
+
+// ForceRefresh reloads rules from all organizations (used by /sync).
+func (ml *MetadataLoader) ForceRefresh(ctx context.Context) error {
+	return ml.refresh(ctx)
+}
+
+// maybeRefresh checks TTL and refreshes in the background if expired.
+func (ml *MetadataLoader) maybeRefresh(ctx context.Context) {
+	ml.mu.RLock()
 	expired := time.Since(ml.loadedAt) > ml.ttl
 	ml.mu.RUnlock()
 
-	if !expired {
-		return rules
+	if expired {
+		if err := ml.refresh(ctx); err != nil {
+			ml.logger.WarnContext(ctx, "failed to refresh rules, keeping previous",
+				slog.Any("error", err),
+			)
+		}
+	}
+}
+
+// refresh lists all organizations and loads rbac/* metadata for each.
+func (ml *MetadataLoader) refresh(ctx context.Context) error {
+	// List all organizations.
+	orgs, err := ml.listOrgs(ctx)
+	if err != nil {
+		return fmt.Errorf("list orgs: %w", err)
 	}
 
-	// Cache expired — attempt reload.
-	newRules, err := ml.loadFromMetadata(ctx)
-	if err != nil {
-		ml.logger.WarnContext(ctx, "failed to refresh rules from metadata, using cached rules",
-			slog.Any("error", err),
-		)
+	// Load rules per org.
+	orgRules := make(map[string][]Rule, len(orgs))
 
-		return rules
+	for _, org := range orgs {
+		rules, loadErr := ml.loadOrgRules(ctx, org.ID)
+		if loadErr != nil {
+			ml.logger.WarnContext(ctx, "failed to load rules for org, skipping",
+				slog.String("org_id", org.ID),
+				slog.String("org_name", org.Name),
+				slog.Any("error", loadErr),
+			)
+
+			continue
+		}
+
+		if len(rules) > 0 {
+			orgRules[org.ID] = rules
+		}
 	}
 
 	ml.mu.Lock()
-	ml.rules = newRules
+	ml.orgRules = orgRules
+	ml.orgs = orgs
 	ml.loadedAt = time.Now()
 	ml.mu.Unlock()
 
-	ml.logger.DebugContext(ctx, "refreshed RBAC rules from Org Metadata",
-		slog.Int("rules", len(newRules)),
-	)
-
-	return newRules
+	return nil
 }
 
-// ForceRefresh reloads rules from metadata, ignoring the TTL cache.
-// Used by /sync to ensure fresh rules before full reconciliation.
-func (ml *MetadataLoader) ForceRefresh(ctx context.Context) ([]Rule, error) {
-	rules, err := ml.loadFromMetadata(ctx)
+// listOrgs returns all organizations on the instance.
+func (ml *MetadataLoader) listOrgs(ctx context.Context) ([]OrgInfo, error) {
+	resp, err := ml.api.AdminService().ListOrgs(ctx, &admin.ListOrgsRequest{ //nolint:staticcheck // v2 API not stable yet
+		Query: &object.ListQuery{Limit: 100},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("force refresh metadata: %w", err)
+		return nil, fmt.Errorf("admin ListOrgs: %w", err)
 	}
 
-	ml.mu.Lock()
-	ml.rules = rules
-	ml.loadedAt = time.Now()
-	ml.mu.Unlock()
+	var orgs []OrgInfo
+	for _, o := range resp.GetResult() {
+		orgs = append(orgs, OrgInfo{
+			ID:   o.GetId(),
+			Name: o.GetName(),
+		})
+	}
 
-	ml.logger.InfoContext(ctx, "force-refreshed RBAC rules from Org Metadata",
-		slog.Int("rules", len(rules)),
-	)
-
-	return rules, nil
+	return orgs, nil
 }
 
-// loadFromMetadata reads all rbac/* metadata entries and converts them to rules.
-func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) {
-	resp, err := ml.api.ManagementService().ListOrgMetadata(ctx, &management.ListOrgMetadataRequest{ //nolint:staticcheck // v2 API not stable yet
+// loadOrgRules reads rbac/* metadata for a specific org and converts to rules.
+func (ml *MetadataLoader) loadOrgRules(ctx context.Context, orgID string) ([]Rule, error) {
+	// Scope API call to the org.
+	orgCtx := middleware.SetOrgID(ctx, orgID)
+
+	resp, err := ml.api.ManagementService().ListOrgMetadata(orgCtx, &management.ListOrgMetadataRequest{ //nolint:staticcheck // v2 API not stable yet
 		Queries: []*metadata.MetadataQuery{
 			{
 				Query: &metadata.MetadataQuery_KeyQuery{
@@ -127,9 +189,7 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 
 	// Parse metadata entries into rules.
 	// Key format: "rbac/{cluster-name}/{role-key}"
-	// Value: raw bytes = "email1,email2"
-	//
-	// We invert to: group → [{project: cluster-name, roles: [role-key]}]
+	// Value: base64-encoded "email1,email2" (Pulumi provider encodes as base64)
 	type grantEntry struct {
 		project string
 		role    string
@@ -148,6 +208,7 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 		if len(parts) != 2 {
 			ml.logger.WarnContext(ctx, "skipping malformed metadata key",
 				slog.String("key", key),
+				slog.String("org_id", orgID),
 			)
 
 			continue
@@ -156,10 +217,17 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 		cluster := parts[0]
 		role := parts[1]
 
-		// Value is raw bytes containing comma-separated emails.
+		// Decode value: the Pulumi Zitadel provider stores values as base64.
+		// GetValue() returns the stored bytes which ARE the base64 string.
 		valueBytes := entry.GetValue()
 
-		emails := strings.Split(string(valueBytes), ",")
+		decoded, err := base64.StdEncoding.DecodeString(string(valueBytes))
+		if err != nil {
+			// Try raw bytes (in case future versions store without base64).
+			decoded = valueBytes
+		}
+
+		emails := strings.Split(string(decoded), ",")
 		for _, email := range emails {
 			email = strings.TrimSpace(email)
 			if email == "" {
@@ -173,17 +241,16 @@ func (ml *MetadataLoader) loadFromMetadata(ctx context.Context) ([]Rule, error) 
 		}
 	}
 
-	// Convert to rules format: one Rule per group, aggregating grants per project.
-	rules := make([]Rule, 0, len(groupGrants))
+	// Convert to rules: one Rule per group, with grants per project.
+	var rules []Rule
 
 	for group, entries := range groupGrants {
-		// Aggregate roles per project.
 		projectRoles := make(map[string][]string)
 		for _, e := range entries {
 			projectRoles[e.project] = append(projectRoles[e.project], e.role)
 		}
 
-		grants := make([]Grant, 0, len(projectRoles))
+		var grants []Grant
 		for project, roles := range projectRoles {
 			grants = append(grants, Grant{
 				Project: project,

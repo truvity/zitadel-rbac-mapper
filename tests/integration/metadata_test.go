@@ -88,7 +88,14 @@ func TestMetadataLoader(t *testing.T) {
 	}
 
 	// Verify rules were loaded correctly.
-	rules := loader.Rules(ctx)
+	var rules []mapper.Rule
+	for _, org := range loader.Orgs() {
+		r := loader.Rules(ctx, org.ID)
+		if len(r) > 0 {
+			rules = r
+			break
+		}
+	}
 
 	if len(rules) == 0 {
 		t.Fatal("expected at least one rule, got 0")
@@ -183,7 +190,14 @@ func TestMetadataLoader_Refresh(t *testing.T) {
 	}
 
 	// Verify initial load.
-	rules := loader.Rules(ctx)
+	var rules []mapper.Rule
+	for _, org := range loader.Orgs() {
+		r := loader.Rules(ctx, org.ID)
+		if len(r) > 0 {
+			rules = r
+			break
+		}
+	}
 	initialCount := len(rules)
 
 	if initialCount == 0 {
@@ -216,7 +230,14 @@ func TestMetadataLoader_Refresh(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// Rules() should now trigger a refresh and return the new data.
-	refreshedRules := loader.Rules(ctx)
+	var refreshedRules []mapper.Rule
+	for _, org := range loader.Orgs() {
+		r := loader.Rules(ctx, org.ID)
+		if len(r) > 0 {
+			refreshedRules = r
+			break
+		}
+	}
 
 	if len(refreshedRules) <= initialCount {
 		t.Errorf("expected more rules after refresh: initial=%d, refreshed=%d", initialCount, len(refreshedRules))

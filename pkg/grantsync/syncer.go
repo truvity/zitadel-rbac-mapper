@@ -295,3 +295,12 @@ func (s *Syncer) LookupProjectID(ctx context.Context, name string) (string, erro
 
 	return resp.GetResult()[0].GetId(), nil
 }
+
+// ListUsersInOrg returns all human users scoped to a specific organization.
+func (s *Syncer) ListUsersInOrg(ctx context.Context, orgID string) ([]UserInfo, error) {
+	if orgID != "" {
+		ctx = middleware.SetOrgID(ctx, orgID)
+	}
+
+	return s.ListUsers(ctx)
+}

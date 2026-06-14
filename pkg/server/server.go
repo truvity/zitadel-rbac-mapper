@@ -65,13 +65,8 @@ func Run(
 	// Shared per-user lock map.
 	userLocks := &UserLocks{}
 
-	// Create a function that returns the current mapper from cached rules.
-	getMapper := func() *mapper.Mapper {
-		return mapper.NewMapper(metadataLoader.Rules(ctx))
-	}
-
 	// Routes.
-	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, getMapper, syncer, jwtVerifier, userLocks))
+	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, metadataLoader, syncer, jwtVerifier, userLocks))
 	app.Post("/sync", NewSyncAllHandler(logger, res, metadataLoader, syncer, cfg.SyncAPIKey, userLocks))
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusOK)

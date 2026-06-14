@@ -14,7 +14,7 @@ import (
 
 const problemBase = "https://github.com/truvity/zitadel-rbac-mapper/problems/"
 
-// SyncAllResponse is the JSON response for POST /sync (full reconciliation).
+// SyncAllResponse is the JSON response for POST /sync.
 type SyncAllResponse struct {
 	UsersProcessed int `json:"users_processed"`
 	GrantsAdded    int `json:"grants_added"`
@@ -23,8 +23,8 @@ type SyncAllResponse struct {
 }
 
 // NewSyncAllHandler returns a fiber handler for POST /sync (full reconciliation).
-// It verifies the X-Sync-Key header, force-refreshes rules, lists all users,
-// and syncs grants for each user.
+// It verifies the X-Sync-Key header, force-refreshes rules across all orgs,
+// then iterates each org → lists users → syncs grants.
 func NewSyncAllHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
@@ -46,9 +46,8 @@ func NewSyncAllHandler(
 
 		ctx := c.Context()
 
-		// Force refresh rules from Org Metadata.
-		rules, err := metadataLoader.ForceRefresh(ctx)
-		if err != nil {
+		// Force refresh rules from all Org Metadata.
+		if err := metadataLoader.ForceRefresh(ctx); err != nil {
 			logger.ErrorContext(ctx, "failed to refresh rules", slog.Any("error", err))
 
 			return sendProblem(c, fiber.StatusBadGateway,
@@ -58,56 +57,58 @@ func NewSyncAllHandler(
 			)
 		}
 
-		m := mapper.NewMapper(rules)
-
-		// List all human users.
-		users, err := syncer.ListUsers(ctx)
-		if err != nil {
-			logger.ErrorContext(ctx, "failed to list users", slog.Any("error", err))
-
-			return sendProblem(c, fiber.StatusBadGateway,
-				problemBase+"zitadel-error",
-				"Zitadel API Error",
-				err.Error(),
-			)
-		}
-
-		logger.InfoContext(ctx, "starting full sync",
-			slog.Int("users", len(users)),
-			slog.Int("rules", len(rules)),
-		)
-
 		var response SyncAllResponse
 
-		for _, u := range users {
-			// Skip machine users (no @ in email).
-			if !strings.Contains(u.Email, "@") {
+		// Iterate all organizations and sync users per org.
+		for _, org := range metadataLoader.Orgs() {
+			rules := metadataLoader.Rules(ctx, org.ID)
+			if len(rules) == 0 {
 				continue
 			}
 
-			// Acquire per-user lock.
-			userLocks.Lock(u.ID)
+			m := mapper.NewMapper(rules)
 
-			result, syncErr := syncSingleUser(ctx, logger, res, m, syncer, u.ID, u.Email)
-
-			userLocks.Unlock(u.ID)
-
-			if syncErr != nil {
-				logger.WarnContext(ctx, "failed to sync user, skipping",
-					slog.String("user_id", u.ID),
-					slog.String("email", u.Email),
-					slog.Any("error", syncErr),
+			// List users in this org.
+			orgCtx := context.WithValue(ctx, orgContextKey{}, org.ID)
+			users, err := syncer.ListUsersInOrg(orgCtx, org.ID)
+			if err != nil {
+				logger.WarnContext(ctx, "failed to list users for org, skipping",
+					slog.String("org_id", org.ID),
+					slog.String("org_name", org.Name),
+					slog.Any("error", err),
 				)
 
 				continue
 			}
 
-			response.UsersProcessed++
+			for _, u := range users {
+				if !strings.Contains(u.Email, "@") {
+					continue
+				}
 
-			if result != nil {
-				response.GrantsAdded += result.Added
-				response.GrantsUpdated += result.Updated
-				response.GrantsRemoved += result.Removed
+				userLocks.Lock(u.ID)
+
+				result, syncErr := syncSingleUser(ctx, logger, res, m, syncer, u.ID, u.Email, org.ID)
+
+				userLocks.Unlock(u.ID)
+
+				if syncErr != nil {
+					logger.WarnContext(ctx, "failed to sync user, skipping",
+						slog.String("user_id", u.ID),
+						slog.String("email", u.Email),
+						slog.Any("error", syncErr),
+					)
+
+					continue
+				}
+
+				response.UsersProcessed++
+
+				if result != nil {
+					response.GrantsAdded += result.Added
+					response.GrantsUpdated += result.Updated
+					response.GrantsRemoved += result.Removed
+				}
 			}
 		}
 
@@ -122,22 +123,22 @@ func NewSyncAllHandler(
 	}
 }
 
+type orgContextKey struct{}
+
 // syncSingleUser resolves groups and syncs grants for a single user.
 func syncSingleUser(
 	ctx context.Context,
-	logger *slog.Logger,
+	_ *slog.Logger,
 	res resolver.GroupsResolver,
 	m *mapper.Mapper,
 	syncer *grantsync.Syncer,
-	userID, email string,
+	userID, email, orgID string,
 ) (*grantsync.SyncResult, error) {
-	// Resolve groups.
 	groups, err := res.ResolveGroups(ctx, email)
 	if err != nil {
 		return nil, err
 	}
 
-	// Map groups to desired grants.
 	mapperGrants := m.MapGroups(groups)
 
 	desired := make([]grantsync.DesiredGrant, 0, len(mapperGrants))
@@ -148,21 +149,5 @@ func syncSingleUser(
 		})
 	}
 
-	// Sync grants.
-	result, err := syncer.Sync(ctx, userID, desired, "")
-	if err != nil {
-		return nil, err
-	}
-
-	if result.Added > 0 || result.Updated > 0 || result.Removed > 0 {
-		logger.InfoContext(ctx, "user grants synced",
-			slog.String("user_id", userID),
-			slog.String("email", email),
-			slog.Int("added", result.Added),
-			slog.Int("updated", result.Updated),
-			slog.Int("removed", result.Removed),
-		)
-	}
-
-	return result, nil
+	return syncer.Sync(ctx, userID, desired, orgID)
 }

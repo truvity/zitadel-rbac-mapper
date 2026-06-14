@@ -48,7 +48,10 @@ func Run(ctx context.Context) error {
 	// JWKS URL is derived from ZITADEL_DOMAIN.
 	jwtVerifier := zitadeljwt.New(cfg.ZitadelDomain)
 
-	rulesCount := len(metadataLoader.Rules(ctx))
+	rulesCount := 0
+	for _, org := range metadataLoader.Orgs() {
+		rulesCount += len(metadataLoader.Rules(ctx, org.ID))
+	}
 
 	logger.InfoContext(ctx, "starting zitadel-rbac-mapper",
 		slog.Int("port", cfg.Port),

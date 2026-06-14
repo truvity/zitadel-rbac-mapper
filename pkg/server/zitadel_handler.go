@@ -64,7 +64,7 @@ type (
 func NewZitadelWebhookHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
-	getMapper func() *mapper.Mapper,
+	metadataLoader *mapper.MetadataLoader,
 	syncer *grantsync.Syncer,
 	jwtVerifier *zitadeljwt.Verifier,
 	userLocks *UserLocks,
@@ -142,7 +142,7 @@ func NewZitadelWebhookHandler(
 		if syncer != nil && userID != "" && len(groups) > 0 {
 			// Acquire per-user lock.
 			userLocks.Lock(userID)
-			syncGrants(ctx, logger, getMapper, syncer, userID, groups, payload.Org)
+			syncGrants(ctx, logger, metadataLoader, syncer, userID, groups, payload.Org)
 			userLocks.Unlock(userID)
 		}
 
@@ -162,13 +162,29 @@ func NewZitadelWebhookHandler(
 func syncGrants(
 	ctx context.Context,
 	logger *slog.Logger,
-	getMapper func() *mapper.Mapper,
+	metadataLoader *mapper.MetadataLoader,
 	syncer *grantsync.Syncer,
 	userID string,
 	groups []string,
 	org *zitadelOrg,
 ) {
-	mapperGrants := getMapper().MapGroups(groups)
+	var orgID string
+	if org != nil {
+		orgID = org.ID
+	}
+
+	rules := metadataLoader.Rules(ctx, orgID)
+	if len(rules) == 0 {
+		logger.WarnContext(ctx, "no rules for org, skipping grant sync",
+			slog.String("org_id", orgID),
+			slog.String("user_id", userID),
+		)
+
+		return
+	}
+
+	m := mapper.NewMapper(rules)
+	mapperGrants := m.MapGroups(groups)
 
 	desired := make([]grantsync.DesiredGrant, 0, len(mapperGrants))
 	for _, mg := range mapperGrants {
@@ -176,12 +192,6 @@ func syncGrants(
 			ProjectID: mg.Project,
 			RoleKeys:  mg.Roles,
 		})
-	}
-
-	// Pass org ID from the function payload to scope Management API calls.
-	var orgID string
-	if org != nil {
-		orgID = org.ID
 	}
 
 	result, syncErr := syncer.Sync(ctx, userID, desired, orgID)
