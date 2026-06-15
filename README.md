@@ -98,7 +98,7 @@ No event executions needed. No webhook targets needed.
 | `ZITADEL_KEY_JSON` | Yes | — | Raw JWT key JSON content (Lambda: loaded from SM by entry point) |
 | `ZITADEL_KEY_SECRET_NAME` | No | — | AWS Secrets Manager secret name (Lambda entry point only) |
 | `GROUPS_RESOLVER_URL` | Yes | — | google-group-sync base URL (e.g., `http://localhost:9090`) |
-| `SYNC_API_KEY` | Yes | — | API key for `/sync` endpoint authentication (`X-Sync-Key` header) |
+| `SYNC_API_KEY` | Yes | — | API key for `/sync` endpoint authentication (Bearer token) |
 | `RULES_CACHE_TTL` | No | `5m` | TTL for Org Metadata rules cache |
 | `PORT` | No | `8080` | HTTP server port |
 | `HEALTH_PORT` | No | `7070` | Health probe port |
@@ -110,15 +110,15 @@ No event executions needed. No webhook targets needed.
 Rules are stored as Zitadel Org Metadata entries (written by Pulumi):
 
 ```
-Key:   rbac/{cluster-name}/{role-key}
-Value: comma-delimited Google Group emails
+Key:   rbac/{zitadel-project-id}/{role-key}
+Value: base64-encoded comma-delimited Google Group emails
 ```
 
 Example:
 ```
-rbac/kernel/admin      = engineering-admin@truvity.com,engineering-sre@truvity.com
-rbac/devel/deployer    = engineering-devops@truvity.com
-rbac/devel/billing:deployer = product-billing@truvity.com,engineering-product@truvity.com
+rbac/376393789184419014/admin      = base64("engineering-admin@truvity.com,engineering-sre@truvity.com")
+rbac/376393789184419014/deployer   = base64("engineering-devops@truvity.com")
+rbac/376393789184419014/billing:deployer = base64("product-billing@truvity.com,engineering-product@truvity.com")
 ```
 
 The mapper reads all `rbac/*` entries at startup and caches them for `RULES_CACHE_TTL`. The `/sync` endpoint forces a cache refresh before processing.
@@ -141,12 +141,12 @@ On `preaccesstoken`: returns empty groups claim (no grant sync — payload lacks
 
 ### POST /sync — Full user reconciliation
 
-Reloads rules from Org Metadata, lists all human users in the org, resolves groups for each, and syncs grants idempotently. Protected by API key.
+Reloads rules from Org Metadata, lists all human users in the org, resolves groups for each, and syncs grants idempotently. Protected by Bearer token.
 
 **Request:**
 ```
 POST /sync
-X-Sync-Key: <SYNC_API_KEY value>
+Authorization: Bearer <SYNC_API_KEY value>
 ```
 
 **Response:**
