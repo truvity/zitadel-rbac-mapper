@@ -9,7 +9,7 @@ require (
 	github.com/lestrrat-go/jwx/v4 v4.0.2
 	github.com/samber/slog-fiber v1.22.2
 	github.com/zalando/go-keyring v0.2.8
-	github.com/zitadel/oidc/v3 v3.45.5
+	github.com/zitadel/oidc/v3 v3.47.5
 	github.com/zitadel/zitadel-go/v3 v3.29.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -61,7 +61,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	golang.org/x/crypto v0.53.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
-	golang.org/x/oauth2 v0.35.0 // indirect
+	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260209200024-4cfbd4190f57 // indirect
