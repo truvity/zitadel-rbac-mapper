@@ -67,7 +67,7 @@ sidecar:
   enabled: false
   image:
     repository: ghcr.io/truvity/google-group-sync
-    tag: "0.4.0"
+    tag: "0.6.1"
   env:
     GOOGLE_ADMIN_EMAIL: ""
     GOOGLE_SA_KEY_FILE: "/etc/secrets/google-sa-key.json"
