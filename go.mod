@@ -10,7 +10,7 @@ require (
 	github.com/samber/slog-fiber v1.22.2
 	github.com/zalando/go-keyring v0.2.8
 	github.com/zitadel/oidc/v3 v3.47.5
-	github.com/zitadel/zitadel-go/v3 v3.29.0
+	github.com/zitadel/zitadel-go/v3 v3.29.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 
