@@ -26,8 +26,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/truvity/zitadel-rbac-mapper/pkg/grantsync"
 	"github.com/zalando/go-keyring"
+
+	"github.com/truvity/zitadel-rbac-mapper/pkg/grantsync"
 )
 
 type (

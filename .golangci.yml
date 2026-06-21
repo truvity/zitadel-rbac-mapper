@@ -27,6 +27,8 @@ linters:
     misspell:
       locale: US
     gocyclo:
+      # Go Report Card uses 15. We use 25 to accommodate complex server
+      # setup functions. Anything above 25 should be refactored.
       min-complexity: 25
 
 formatters:
@@ -44,3 +46,4 @@ issues:
     - path: _test\.go
       linters:
         - unparam
+        - gocyclo
