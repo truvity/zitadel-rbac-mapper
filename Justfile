@@ -1,5 +1,8 @@
 # Development commands for zitadel-rbac-mapper
 
+# Disable go.work (parent workspace interferes with standalone module builds)
+export GOWORK := "off"
+
 # Build all binaries
 build:
     go build -o bin/zitadel-rbac-mapper ./cmd/zitadel-rbac-mapper/

@@ -1,5 +1,10 @@
 # Zitadel RBAC Mapper
 
+[![CI](https://github.com/truvity/zitadel-rbac-mapper/actions/workflows/ci.yaml/badge.svg)](https://github.com/truvity/zitadel-rbac-mapper/actions/workflows/ci.yaml)
+[![Release](https://github.com/truvity/zitadel-rbac-mapper/actions/workflows/release.yaml/badge.svg)](https://github.com/truvity/zitadel-rbac-mapper/actions/workflows/release.yaml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/truvity/zitadel-rbac-mapper)](https://goreportcard.com/report/github.com/truvity/zitadel-rbac-mapper)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Groups-to-grants mapping webhook for [Zitadel](https://zitadel.com) Actions V2. Resolves user's Google Workspace group memberships, maps groups to project roles, syncs UserGrants, and enriches tokens with a `groups` claim — all in a single synchronous function call during the OIDC flow.
 
 ## What it does
