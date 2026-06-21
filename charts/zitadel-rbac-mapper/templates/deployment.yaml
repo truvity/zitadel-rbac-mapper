@@ -33,6 +33,10 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
+            {{- if .Values.syncAPIKey }}
+            - name: SYNC_API_KEY
+              value: {{ .Values.syncAPIKey | quote }}
+            {{- end }}
             {{- if .Values.zitadelKey.secretName }}
             - name: ZITADEL_KEY_FILE
               value: {{ .Values.zitadelKey.mountPath | quote }}
@@ -66,42 +70,6 @@ spec:
               mountPath: {{ dir .Values.zitadelKey.mountPath }}
               readOnly: true
             {{- end }}
-            {{- if and .Values.sidecar.enabled .Values.sidecar.saKey.secretName }}
-            - name: google-sa-key
-              mountPath: /etc/secrets
-              readOnly: true
-            {{- end }}
-        {{- if .Values.sidecar.enabled }}
-        - name: google-group-sync
-          image: "{{ .Values.sidecar.image.repository }}:{{ .Values.sidecar.image.tag }}"
-          env:
-            {{- range $key, $value := .Values.sidecar.env }}
-            - name: {{ $key }}
-              value: {{ $value | quote }}
-            {{- end }}
-          ports:
-            - name: groups
-              containerPort: 9090
-              protocol: TCP
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 7070
-            initialDelaySeconds: 3
-            periodSeconds: 10
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 64Mi
-          volumeMounts:
-            {{- if .Values.sidecar.saKey.secretName }}
-            - name: google-sa-key
-              mountPath: /etc/secrets
-              readOnly: true
-            {{- end }}
-        {{- end }}
       volumes:
         {{- if .Values.rules }}
         - name: rules
@@ -116,11 +84,15 @@ spec:
               - key: {{ .Values.zitadelKey.secretKey }}
                 path: {{ base .Values.zitadelKey.mountPath }}
         {{- end }}
-        {{- if and .Values.sidecar.enabled .Values.sidecar.saKey.secretName }}
-        - name: google-sa-key
-          secret:
-            secretName: {{ .Values.sidecar.saKey.secretName }}
-            items:
-              - key: {{ .Values.sidecar.saKey.secretKey }}
-                path: {{ .Values.sidecar.saKey.secretKey }}
-        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

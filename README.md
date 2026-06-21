@@ -5,229 +5,143 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/truvity/zitadel-rbac-mapper)](https://goreportcard.com/report/github.com/truvity/zitadel-rbac-mapper)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Groups-to-grants mapping webhook for [Zitadel](https://zitadel.com) Actions V2. Resolves user's Google Workspace group memberships, maps groups to project roles, syncs UserGrants, and enriches tokens with a `groups` claim — all in a single synchronous function call during the OIDC flow.
-
-## What it does
-
-On every login (OIDC token issuance), Zitadel calls this webhook via `preuserinfo`/`preaccesstoken` function executions. The webhook:
-
-1. **Resolves groups** — calls google-group-sync (localhost:9090) to get the user's Google Workspace group emails
-2. **Syncs grants** — maps groups to project roles via configured rules, then performs idempotent add/update/remove of UserGrants in Zitadel via gRPC
-3. **Enriches token** — returns `append_claims` with a `groups` claim containing the group email list
-
-The grant sync is idempotent — if grants are already correct, no Zitadel API calls are made.
+Groups-to-grants mapping webhook for [Zitadel](https://zitadel.com) Actions V2. Resolves user's Google Workspace group memberships, maps groups to project roles, syncs UserGrants, and enriches tokens with a `groups` claim.
 
 ## Architecture
 
 ```
 [User logs in] → [Zitadel OIDC flow]
-                        │
-                        ├─ function/preuserinfo  ──→ [restCall target] ──→ POST /webhook
-                        └─ function/preaccesstoken → [restCall target] ──→ POST /webhook
-                                                                                │
-                                                        [zitadel-rbac-mapper Lambda]
-                                                                │
-                                                                ├─ google-group-sync extension (localhost:9090)
-                                                                ├─ resolve groups → map to grants → sync via gRPC
-                                                                └─ return {"append_claims": [{"key":"groups","value":[...]}]}
+    │
+    ├─ function/preuserinfo  → POST /webhook → groups claim + grant sync
+    └─ function/preaccesstoken → POST /webhook → groups claim (no grant sync)
 ```
 
-## Why Functions, Not Events
+### K8s Deployment
 
-Grant sync runs in the **`preuserinfo` function** (not as an async event handler) because:
+```
+[Envoy Gateway] → [rbac-mapper Deployment] → [google-group-sync Service]
+                         │                              └─ separate failure domain
+                         ├─ FileSource (rules from ConfigMap)
+                         └─ Zitadel gRPC (grant sync only)
+```
 
-- **Timing**: Grants must exist before the token is issued. Async events arrive after the fact — too late.
-- **Reliability**: Functions are synchronous and inline. Events have no delivery guarantees and can be delayed/dropped on Zitadel Cloud.
-- **Idempotency**: The sync is diff-based. Running on every login is safe — no-op if nothing changed.
-- **Simplicity**: One target, two executions. No event infrastructure needed.
+### Lambda Deployment
 
-## Zitadel Configuration
+```
+[Zitadel restCall] → [Lambda Function URL] → [rbac-mapper + google-group-sync extension]
+                                                    └─ SSMSource (rules from Parameter Store)
+```
 
-### 1. Create a REST Call target
+## RulesSource Interface
+
+Rules are loaded via the `RulesSource` interface — platform mains inject their implementation:
+
+```go
+type RulesSource interface {
+    Rules(ctx context.Context, orgID string) []Rule
+    Orgs() []OrgInfo
+    ForceRefresh(ctx context.Context) error
+}
+```
+
+| Implementation | Platform | Source | Refresh |
+|----------------|----------|--------|---------|
+| `FileSource` | K8s | Mounted ConfigMap YAML file | Re-read + content hash |
+| `SSMSource` | Lambda | SSM Parameter Store (via extension at localhost:2773) | Extension TTL + content hash |
+| `OrgMetadataSource` | Legacy | Zitadel Org Metadata API | TTL cache + ForceRefresh |
+
+### Rules File Schema (FileSource / SSMSource)
+
+```yaml
+orgs:
+  - id: "376393772658861254"
+    name: "Truvity B.V."
+    rules:
+      - group: "engineering-admin@truvity.com"
+        grants:
+          - project: "376393789184419014"
+            roles: ["admin"]
+      - group: "engineering-devops@truvity.com"
+        grants:
+          - project: "376393789184419014"
+            roles: ["deployer"]
+```
+
+With rules from a file, **no Zitadel Admin/Management API calls are needed for rule reading** — ZITADEL access is only for writing UserGrants (grantsync) and JWKS verification.
+
+## K8s vs Lambda Wiring
+
+| Concern | K8s | Lambda |
+|---------|-----|--------|
+| Rules | FileSource (ConfigMap mount) | SSMSource (extension localhost:2773) |
+| Group sync | google-group-sync Service (separate Deployment) | google-group-sync extension (localhost:9090) |
+| Entry point | `cmd/zitadel-rbac-mapper` | `cmd/zitadel-rbac-mapper-lambda` |
+| Batch sync | `sync` subcommand (CronJob) | EventBridge → POST /sync |
+
+## Sync Mode (Batch Reconciliation)
+
+The `sync` subcommand runs a full reconcile and exits:
 
 ```bash
-curl -L -X POST 'https://<ZITADEL_DOMAIN>/v2/actions/targets' \
--H 'Content-Type: application/json' \
--H 'Authorization: Bearer <PAT>' \
---data-raw '{
-  "name": "rbac-mapper",
-  "restCall": {
-    "interruptOnError": false
-  },
-  "endpoint": "https://<LAMBDA_FUNCTION_URL>/webhook",
-  "timeout": "30s",
-  "payloadType": "PAYLOAD_TYPE_JWT"
-}'
+zitadel-rbac-mapper sync
 ```
 
-**Important:**
-- Target type must be **REST Call** (not Webhook) — Zitadel reads the response body to apply `append_claims`
-- Payload type **JWT** — the body is signed with the instance key, verified via JWKS
-- `interruptOnError: false` — token issuance continues even if the webhook fails
+It lists all groups via google-group-sync (ListGroups), computes desired UserGrants for every member against the rules, reconciles in ZITADEL via grantsync **including pruning stale grants**, then exits. Idempotent — safe to run repeatedly.
 
-### 2. Create function executions
+In K8s, run via CronJob (chart `cronJob.schedule`, default every 15 min).
+
+## Helm Chart
 
 ```bash
-# Adds "groups" claim to userinfo endpoint
-curl -L -X PUT 'https://<ZITADEL_DOMAIN>/v2/actions/executions' \
--H 'Content-Type: application/json' \
--H 'Authorization: Bearer <PAT>' \
---data-raw '{"condition":{"function":{"name":"preuserinfo"}},"targets":["<TARGET_ID>"]}'
-
-# Adds "groups" claim to access token
-curl -L -X PUT 'https://<ZITADEL_DOMAIN>/v2/actions/executions' \
--H 'Content-Type: application/json' \
--H 'Authorization: Bearer <PAT>' \
---data-raw '{"condition":{"function":{"name":"preaccesstoken"}},"targets":["<TARGET_ID>"]}'
+helm install zitadel-rbac-mapper oci://ghcr.io/truvity/charts/zitadel-rbac-mapper \
+  --set zitadelKey.secretName=zitadel-sa-key \
+  --set groupSync.serviceURL=http://google-group-sync.zitadel-rbac-mapper.svc:8080 \
+  --set env.ZITADEL_DOMAIN=auth.truvity.xyz
 ```
 
-### Final configuration
+### Chart Values
 
-| Target | Type | Payload | Timeout |
-|--------|------|---------|---------|
-| `rbac-mapper` | REST Call | JWT | 30s |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `env.RULES_FILE` | `/etc/config/rules.yaml` | Rules file path (FileSource) |
+| `env.GROUPS_RESOLVER_URL` | — | google-group-sync Service URL |
+| `env.ZITADEL_DOMAIN` | — | Zitadel instance domain |
+| `zitadelKey.secretName` | — | K8s Secret with Zitadel JWT key |
+| `syncAPIKey` | — | API key for /sync endpoint |
+| `rules` | `[]` | Rules YAML (mounted as ConfigMap) |
+| `cronJob.enabled` | `true` | CronJob for batch sync |
+| `cronJob.schedule` | `*/15 * * * *` | CronJob schedule |
+| `httpRoute.enabled` | `false` | HTTPRoute (Envoy Gateway) |
+| `ciliumNetworkPolicy.enabled` | `false` | CiliumNetworkPolicy |
+| `rbac.enabled` | `false` | Role + RoleBinding |
 
-| Execution | Condition | Effect |
-|-----------|-----------|--------|
-| preuserinfo | `function/preuserinfo` | Groups claim in userinfo + grant sync |
-| preaccesstoken | `function/preaccesstoken` | Groups claim in access token (no grant sync — payload lacks org context) |
-
-No event executions needed. No webhook targets needed.
+Optional templates (default off, values-gated):
+- **HTTPRoute** — webhook is the one external surface (called by Zitadel Actions)
+- **CiliumNetworkPolicy** — hook ingress only from Envoy Gateway
+- **RBAC** — Role/RoleBinding for API server access
 
 ## Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `ZITADEL_DOMAIN` | Yes | — | Zitadel instance domain (for gRPC + JWKS + Org Metadata) |
+| `ZITADEL_DOMAIN` | Yes | — | Zitadel instance domain |
 | `ZITADEL_PORT` | No | `443` | Zitadel gRPC port |
-| `ZITADEL_KEY_JSON` | Yes | — | Raw JWT key JSON content (Lambda: loaded from SM by entry point) |
-| `ZITADEL_KEY_SECRET_NAME` | No | — | AWS Secrets Manager secret name (Lambda entry point only) |
-| `GROUPS_RESOLVER_URL` | Yes | — | google-group-sync base URL (e.g., `http://localhost:9090`) |
-| `SYNC_API_KEY` | Yes | — | API key for `/sync` endpoint authentication (Bearer token) |
-| `RULES_CACHE_TTL` | No | `5m` | TTL for Org Metadata rules cache |
+| `ZITADEL_KEY_JSON` | Yes | — | JWT key JSON for SA auth |
+| `GROUPS_RESOLVER_URL` | Yes | `http://localhost:9090` | google-group-sync URL |
+| `SYNC_API_KEY` | Yes | — | Bearer token for /sync |
+| `RULES_FILE` | No | — | Path to rules YAML (FileSource) |
+| `RULES_CACHE_TTL` | No | `5m` | TTL for OrgMetadata mode |
 | `PORT` | No | `8080` | HTTP server port |
 | `HEALTH_PORT` | No | `7070` | Health probe port |
-| `LOG_LEVEL` | No | `info` | Log level: debug, info, warn, error |
-| `LOG_FORMAT` | No | `json` | Log format: json, text |
-
-## Rules (Org Metadata)
-
-Rules are stored as Zitadel Org Metadata entries (written by Pulumi):
-
-```
-Key:   rbac/{zitadel-project-id}/{role-key}
-Value: base64-encoded comma-delimited Google Group emails
-```
-
-Example:
-```
-rbac/376393789184419014/admin      = base64("engineering-admin@truvity.com,engineering-sre@truvity.com")
-rbac/376393789184419014/deployer   = base64("engineering-devops@truvity.com")
-rbac/376393789184419014/billing:deployer = base64("product-billing@truvity.com,engineering-product@truvity.com")
-```
-
-The mapper reads all `rbac/*` entries at startup and caches them for `RULES_CACHE_TTL`. The `/sync` endpoint forces a cache refresh before processing.
-
-## API
-
-### POST /webhook — Zitadel Actions V2 function handler
-
-Receives JWT-signed payloads from Zitadel's `preuserinfo` and `preaccesstoken` function executions.
-
-**Request:** JWT body containing the function payload (verified via JWKS at `ZITADEL_DOMAIN/oauth/v2/keys`).
-
-**Response:**
-```json
-{"append_claims": [{"key": "groups", "value": ["group1@example.com", "group2@example.com"]}]}
-```
-
-On `preuserinfo`: resolves groups, syncs grants (using `org.id` from payload), returns groups claim.
-On `preaccesstoken`: returns empty groups claim (no grant sync — payload lacks org context).
-
-### POST /sync — Full user reconciliation
-
-Reloads rules from Org Metadata, lists all human users in the org, resolves groups for each, and syncs grants idempotently. Protected by Bearer token.
-
-**Request:**
-```
-POST /sync
-Authorization: Bearer <SYNC_API_KEY value>
-```
-
-**Response:**
-```json
-{
-  "users_processed": 10,
-  "grants_added": 3,
-  "grants_updated": 1,
-  "grants_removed": 0
-}
-```
-
-**Authentication:** Requires `X-Sync-Key` header matching `SYNC_API_KEY`. Returns 401 if missing/invalid.
-
-**Triggers:**
-- Lambda: EventBridge scheduled rule (every 15 minutes)
-- K8s: CronJob with API key header
-
-### GET /health — Health check
-
-Returns `200 OK` when the server is ready.
-
-## Deployment
-
-### AWS Lambda (with google-group-sync extension)
-
-```
-[zitadel-rbac-mapper Lambda]
-  ├── LWA layer (event → HTTP on :8080)
-  ├── google-group-sync extension layer (HTTP on :9090)
-  │     └── reads GGS_SA_KEY_SECRET_NAME from Secrets Manager
-  └── rbac-mapper binary
-        ├── POST /webhook — Zitadel Actions V2 function handler (JWT verified)
-        ├── POST /sync — full reconciliation (API key verified, scheduled every 15 min)
-        └── GET /health — health check
-```
-
-#### Org context
-
-The `preuserinfo` payload includes `org.id` — the organization the user belongs to. The mapper passes it as `x-zitadel-orgid` gRPC metadata to scope Management API calls to the correct organization. This is required when the SA belongs to a different org than the projects (e.g., instance-level IAM admin in the default org).
-
-### Kubernetes (Helm chart)
-
-```bash
-helm install zitadel-rbac-mapper oci://ghcr.io/truvity/charts/zitadel-rbac-mapper \
-  --set zitadelKey.secretName=zitadel-sa-key \
-  --set sidecar.enabled=true \
-  --set sidecar.saKey.secretName=google-sa-key
-```
 
 ## Development
 
 ```bash
-devbox shell          # activates dev environment (GOEXPERIMENT=jsonv2)
+devbox shell          # activate dev environment
 just build            # build binaries
 just test             # run unit tests
 just lint             # run linter
-just test-integration # run integration tests (requires real Zitadel)
 just check            # build + test + lint + vuln
-```
-
-### Integration Test Setup
-
-```bash
-# Store Zitadel JWT key in system keyring
-secret-tool store --label='zitadel-rbac-mapper jwt-key' \
-  service zitadel-rbac-mapper username jwt-key < /path/to/key.json
-
-# Delete the key file after storing (don't leave secrets on disk)
-rm /path/to/key.json
-
-# Verify it's stored correctly
-secret-tool lookup service zitadel-rbac-mapper username jwt-key | head -c 20
-
-# Create config (~/.config/zitadel-rbac-mapper/config.yaml)
-# See tests/integration/README.md for required fields
 ```
 
 ## Related

@@ -64,7 +64,7 @@ type (
 func NewZitadelWebhookHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
-	metadataLoader *mapper.MetadataLoader,
+	rulesSource mapper.RulesSource,
 	syncer *grantsync.Syncer,
 	jwtVerifier *zitadeljwt.Verifier,
 	userLocks *UserLocks,
@@ -142,7 +142,7 @@ func NewZitadelWebhookHandler(
 		if syncer != nil && userID != "" && len(groups) > 0 {
 			// Acquire per-user lock.
 			userLocks.Lock(userID)
-			syncGrants(ctx, logger, metadataLoader, syncer, userID, groups, payload.Org)
+			syncGrants(ctx, logger, rulesSource, syncer, userID, groups, payload.Org)
 			userLocks.Unlock(userID)
 		}
 
@@ -162,7 +162,7 @@ func NewZitadelWebhookHandler(
 func syncGrants(
 	ctx context.Context,
 	logger *slog.Logger,
-	metadataLoader *mapper.MetadataLoader,
+	rulesSource mapper.RulesSource,
 	syncer *grantsync.Syncer,
 	userID string,
 	groups []string,
@@ -173,7 +173,7 @@ func syncGrants(
 		orgID = org.ID
 	}
 
-	rules := metadataLoader.Rules(ctx, orgID)
+	rules := rulesSource.Rules(ctx, orgID)
 	if len(rules) == 0 {
 		logger.WarnContext(ctx, "no rules for org, skipping grant sync",
 			slog.String("org_id", orgID),

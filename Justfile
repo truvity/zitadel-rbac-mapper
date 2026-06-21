@@ -18,7 +18,7 @@ test:
 
 # Run integration tests (requires real Zitadel + keyring credentials)
 test-integration:
-    go test -tags=integration -v -count=1 ./tests/integration/...
+    go test -tags=integration -v -count=1 -timeout=120s ./tests/integration/...
 
 # Run linters
 lint:

@@ -21,7 +21,11 @@ type Config struct {
 	// Sync API key (required).
 	SyncAPIKey string
 
-	// Rules cache TTL.
+	// Rules file path (FileSource mode — K8s ConfigMap mount).
+	// If set, rules are loaded from this file instead of Org Metadata.
+	RulesFile string
+
+	// Rules cache TTL (used by OrgMetadataSource when RulesFile is empty).
 	RulesCacheTTL time.Duration
 
 	// Server settings.
@@ -47,6 +51,7 @@ func Load() (*Config, error) {
 		ZitadelPort:       envOrDefault("ZITADEL_PORT", "443"),
 		ZitadelKeyJSON:    os.Getenv("ZITADEL_KEY_JSON"),
 		SyncAPIKey:        os.Getenv("SYNC_API_KEY"),
+		RulesFile:         os.Getenv("RULES_FILE"),
 		RulesCacheTTL:     ttl,
 		LogFormat:         envOrDefault("LOG_FORMAT", "json"),
 	}

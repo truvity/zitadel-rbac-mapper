@@ -8,7 +8,7 @@ func TestLoad_MissingRequired(t *testing.T) {
 	// Clear all relevant env vars.
 	for _, key := range []string{
 		"GROUPS_RESOLVER_URL", "ZITADEL_DOMAIN", "ZITADEL_KEY_JSON",
-		"ZITADEL_PORT", "SYNC_API_KEY", "RULES_CACHE_TTL",
+		"ZITADEL_PORT", "SYNC_API_KEY", "RULES_CACHE_TTL", "RULES_FILE",
 		"PORT", "HEALTH_PORT", "LOG_FORMAT",
 	} {
 		t.Setenv(key, "")

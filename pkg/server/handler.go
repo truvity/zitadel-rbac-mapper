@@ -28,7 +28,7 @@ type SyncAllResponse struct {
 func NewSyncAllHandler(
 	logger *slog.Logger,
 	res resolver.GroupsResolver,
-	metadataLoader *mapper.MetadataLoader,
+	rulesSource mapper.RulesSource,
 	syncer *grantsync.Syncer,
 	apiKey string,
 	userLocks *UserLocks,
@@ -46,8 +46,8 @@ func NewSyncAllHandler(
 
 		ctx := c.Context()
 
-		// Force refresh rules from all Org Metadata.
-		if err := metadataLoader.ForceRefresh(ctx); err != nil {
+		// Force refresh rules from all sources.
+		if err := rulesSource.ForceRefresh(ctx); err != nil {
 			logger.ErrorContext(ctx, "failed to refresh rules", slog.Any("error", err))
 
 			return sendProblem(c, fiber.StatusBadGateway,
@@ -60,8 +60,8 @@ func NewSyncAllHandler(
 		var response SyncAllResponse
 
 		// Iterate all organizations and sync users per org.
-		for _, org := range metadataLoader.Orgs() {
-			rules := metadataLoader.Rules(ctx, org.ID)
+		for _, org := range rulesSource.Orgs() {
+			rules := rulesSource.Rules(ctx, org.ID)
 			if len(rules) == 0 {
 				continue
 			}

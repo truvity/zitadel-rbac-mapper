@@ -1,0 +1,70 @@
+{{- if .Values.cronJob.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "zitadel-rbac-mapper.fullname" . }}-sync
+  labels:
+    {{- include "zitadel-rbac-mapper.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronJob.schedule | quote }}
+  concurrencyPolicy: {{ .Values.cronJob.concurrencyPolicy }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "zitadel-rbac-mapper.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: sync
+        spec:
+          serviceAccountName: {{ .Values.serviceAccount.name | default (include "zitadel-rbac-mapper.fullname" .) }}
+          restartPolicy: OnFailure
+          containers:
+            - name: sync
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["/ko-app/zitadel-rbac-mapper", "sync"]
+              env:
+                {{- range $key, $value := .Values.env }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+                {{- if .Values.syncAPIKey }}
+                - name: SYNC_API_KEY
+                  value: {{ .Values.syncAPIKey | quote }}
+                {{- end }}
+                {{- if .Values.zitadelKey.secretName }}
+                - name: ZITADEL_KEY_FILE
+                  value: {{ .Values.zitadelKey.mountPath | quote }}
+                {{- end }}
+              {{- with .Values.envFrom }}
+              envFrom:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              resources:
+                {{- toYaml .Values.cronJob.resources | nindent 16 }}
+              volumeMounts:
+                {{- if .Values.rules }}
+                - name: rules
+                  mountPath: /etc/config
+                  readOnly: true
+                {{- end }}
+                {{- if .Values.zitadelKey.secretName }}
+                - name: zitadel-key
+                  mountPath: {{ dir .Values.zitadelKey.mountPath }}
+                  readOnly: true
+                {{- end }}
+          volumes:
+            {{- if .Values.rules }}
+            - name: rules
+              configMap:
+                name: {{ include "zitadel-rbac-mapper.fullname" . }}-rules
+            {{- end }}
+            {{- if .Values.zitadelKey.secretName }}
+            - name: zitadel-key
+              secret:
+                secretName: {{ .Values.zitadelKey.secretName }}
+                items:
+                  - key: {{ .Values.zitadelKey.secretKey }}
+                    path: {{ base .Values.zitadelKey.mountPath }}
+            {{- end }}
+{{- end }}

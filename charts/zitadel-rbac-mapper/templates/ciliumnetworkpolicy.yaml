@@ -1,0 +1,21 @@
+{{- if .Values.ciliumNetworkPolicy.enabled }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "zitadel-rbac-mapper.fullname" . }}
+  labels:
+    {{- include "zitadel-rbac-mapper.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "zitadel-rbac-mapper.selectorLabels" . | nindent 6 }}
+  ingress:
+    {{- range .Values.ciliumNetworkPolicy.ingressFrom }}
+    - fromEndpoints:
+        - {{ toYaml . | nindent 10 }}
+      toPorts:
+        - ports:
+            - port: {{ $.Values.env.PORT | default "8080" | quote }}
+              protocol: TCP
+    {{- end }}
+{{- end }}

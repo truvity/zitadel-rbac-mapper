@@ -23,6 +23,9 @@ type OrgInfo struct {
 	Name string
 }
 
+// Compile-time interface check.
+var _ RulesSource = (*MetadataLoader)(nil)
+
 // MetadataLoader loads RBAC rules from Zitadel Org Metadata for all organizations.
 // It discovers orgs at startup, loads rbac/* metadata per org, and caches with TTL.
 // Metadata keys: rbac/{cluster-name}/{role-key}

@@ -25,10 +25,9 @@ resources:
 
 # Environment variables for the mapper.
 env:
-  GROUPS_RESOLVER_URL: "http://localhost:9090/groups"
+  GROUPS_RESOLVER_URL: ""
   ZITADEL_DOMAIN: ""
   ZITADEL_PORT: "443"
-  ZITADEL_PAYLOAD_TYPE: ""
   RULES_FILE: "/etc/config/rules.yaml"
   PORT: "8080"
   HEALTH_PORT: "7070"
@@ -53,27 +52,51 @@ zitadelKey:
 rules: []
 # - group: platform-admins@example.com
 #   grants:
-#     - project: infra
+#     - project: "376393789184419014"
 #       roles: [admin]
-# - group: developers@example.com
-#   grants:
-#     - project: infra
-#       roles: [viewer]
-#     - project: monitoring
-#       roles: [viewer]
 
-# Optional google-group-sync sidecar.
-sidecar:
+# Sync API key (used by CronJob and external schedulers).
+syncAPIKey: ""
+
+# CronJob for full grant reconciliation.
+cronJob:
+  enabled: true
+  schedule: "*/15 * * * *"
+  concurrencyPolicy: Forbid
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+
+# google-group-sync Service URL (K8s mode — calls the separate Deployment).
+groupSync:
+  serviceURL: ""
+  # e.g., http://google-group-sync.zitadel-rbac-mapper.svc:8080
+
+# Optional HTTPRoute (Envoy Gateway) — default off.
+# The webhook is the one external surface (called by Zitadel Actions).
+httpRoute:
   enabled: false
-  image:
-    repository: ghcr.io/truvity/google-group-sync
-    tag: "0.6.1"
-  env:
-    GOOGLE_ADMIN_EMAIL: ""
-    GOOGLE_SA_KEY_FILE: "/etc/secrets/google-sa-key.json"
-    PORT: "9090"
-    HEALTH_PORT: "0"
-  # Mount SA key from a K8s Secret.
-  saKey:
-    secretName: ""
-    secretKey: "sa-key.json"
+  parentRefs: []
+  hostnames: []
+  rules: []
+
+# Optional CiliumNetworkPolicy — default off.
+# When enabled, restricts ingress to the webhook from Envoy Gateway only.
+ciliumNetworkPolicy:
+  enabled: false
+  # Ingress allowed from these endpoints (e.g., Envoy Gateway pods).
+  ingressFrom: []
+  # - matchLabels:
+  #     app.kubernetes.io/name: envoy-gateway
+
+# Optional RBAC (Role/RoleBinding) — default off.
+rbac:
+  enabled: false
+  rules: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -49,7 +49,7 @@ func Run(
 	logger *slog.Logger,
 	cfg Config,
 	res resolver.GroupsResolver,
-	metadataLoader *mapper.MetadataLoader,
+	rulesSource mapper.RulesSource,
 	syncer *grantsync.Syncer,
 	jwtVerifier *zitadeljwt.Verifier,
 ) error {
@@ -66,8 +66,8 @@ func Run(
 	userLocks := &UserLocks{}
 
 	// Routes.
-	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, metadataLoader, syncer, jwtVerifier, userLocks))
-	app.Post("/sync", NewSyncAllHandler(logger, res, metadataLoader, syncer, cfg.SyncAPIKey, userLocks))
+	app.Post("/webhook", NewZitadelWebhookHandler(logger, res, rulesSource, syncer, jwtVerifier, userLocks))
+	app.Post("/sync", NewSyncAllHandler(logger, res, rulesSource, syncer, cfg.SyncAPIKey, userLocks))
 	app.Get("/health", func(c fiber.Ctx) error {
 		return c.SendStatus(fiber.StatusOK)
 	})
