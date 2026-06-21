@@ -16,6 +16,7 @@ linters:
     - unparam
     - nolintlint
     - gosec
+    - gocyclo
 
   settings:
     gocritic:
@@ -25,6 +26,8 @@ linters:
         - performance
     misspell:
       locale: US
+    gocyclo:
+      min-complexity: 25
 
 formatters:
   enable:
