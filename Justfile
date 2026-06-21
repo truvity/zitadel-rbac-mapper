@@ -3,8 +3,12 @@
 # Disable go.work (parent workspace interferes with standalone module builds)
 export GOWORK := "off"
 
+# Format all Go files (gofmt + goimports via golangci-lint)
+fmt:
+    golangci-lint fmt ./...
+
 # Build all binaries
-build:
+build: fmt
     go build -o bin/zitadel-rbac-mapper ./cmd/zitadel-rbac-mapper/
     go build -o bin/zitadel-rbac-mapper-lambda ./cmd/zitadel-rbac-mapper-lambda/
 
