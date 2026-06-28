@@ -48,12 +48,30 @@ zitadelKey:
   # Mount path inside the container.
   mountPath: "/etc/secrets/zitadel-key.json"
 
-# Mapping rules (YAML content, mounted as ConfigMap).
-rules: []
-# - group: platform-admins@example.com
-#   grants:
-#     - project: "376393789184419014"
-#       roles: [admin]
+# Mapping rules (mounted as ConfigMap at /etc/config/rules.yaml).
+# Two formats supported:
+#
+# Format 1 (structured — preferred for Helm values):
+#   rules:
+#     orgId: "378861397431332737"
+#     orgName: "Truvity B.V."
+#     entries:
+#       - group: platform-admins@example.com
+#         grants:
+#           - project: "376393789184419014"
+#             roles: [admin]
+#
+# Format 2 (raw — pass the orgs[] structure directly):
+#   rules:
+#     orgs:
+#       - id: "378861397431332737"
+#         name: "Truvity B.V."
+#         rules:
+#           - group: platform-admins@example.com
+#             grants:
+#               - project: "376393789184419014"
+#                 roles: [admin]
+rules: {}
 
 # Sync API key (used by CronJob and external schedulers).
 syncAPIKey: ""

@@ -7,5 +7,13 @@ metadata:
     {{- include "zitadel-rbac-mapper.labels" . | nindent 4 }}
 data:
   rules.yaml: |
+    {{- if .Values.rules.orgs }}
     {{- .Values.rules | toYaml | nindent 4 }}
+    {{- else }}
+    orgs:
+      - id: {{ .Values.rules.orgId | default "" | quote }}
+        name: {{ .Values.rules.orgName | default "" | quote }}
+        rules:
+        {{- .Values.rules.entries | toYaml | nindent 8 }}
+    {{- end }}
 {{- end }}
