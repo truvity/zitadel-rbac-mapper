@@ -2,6 +2,20 @@
 
 All notable changes to zitadel-rbac-mapper are documented here.
 
+## [0.13.0] — 2026-07-04
+
+### Changed
+- Go toolchain updated to 1.26.4 (security release: CVE-2026-42504 mime quadratic complexity, plus 2 additional stdlib fixes)
+- devbox packages updated (govulncheck 1.3.0→1.5.0, just 1.51.0→1.54.0, just-lsp 0.4.5→0.4.7, helm 3.20.2→4.2.2)
+- golangci-lint config migrated to v2 schema (`issues.exclude-rules` → `linters.exclusions.rules`)
+- Remaining Go dependencies updated to latest:
+  - github.com/grpc-ecosystem/grpc-gateway/v2 v2.28.0→v2.29.0
+  - google.golang.org/grpc v1.79.3→v1.82.0
+
+### Security
+- Go 1.26.4 fixes CVE-2026-42504 (mime: quadratic complexity in WordDecoder.DecodeHeader)
+- govulncheck reports no known vulnerabilities in dependency tree
+
 ## [0.11.0] — 2026-06-21
 
 ### Added

@@ -31,6 +31,13 @@ linters:
       # setup functions. Anything above 25 should be refactored.
       min-complexity: 25
 
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - unparam
+          - gocyclo
+
 formatters:
   enable:
     - gofmt
@@ -40,10 +47,3 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/truvity/zitadel-rbac-mapper
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - unparam
-        - gocyclo
