@@ -138,6 +138,17 @@ func NewZitadelWebhookHandler(
 			groups = []string{}
 		}
 
+		// Count rule-matched grants for diagnostics.
+		grantsCount := 0
+		if rulesSource != nil && len(groups) > 0 {
+			var orgID string
+			if payload.Org != nil {
+				orgID = payload.Org.ID
+			}
+
+			grantsCount = len(mapper.NewMapper(rulesSource.Rules(ctx, orgID)).MapGroups(groups))
+		}
+
 		// Sync grants (idempotent — no-op if already correct).
 		if syncer != nil && userID != "" && len(groups) > 0 {
 			// Acquire per-user lock.
@@ -146,9 +157,23 @@ func NewZitadelWebhookHandler(
 			userLocks.Unlock(userID)
 		}
 
-		logger.InfoContext(ctx, "returning groups claim",
-			slog.Int("groups_count", len(groups)),
-		)
+		// One structured line per enrichment request: WARN on zero groups so
+		// "empty claims" responses are diagnosable from logs.
+		if len(groups) == 0 {
+			logger.WarnContext(ctx, "user resolved to 0 groups — identity may lack google-group membership",
+				slog.String("email", email),
+				slog.String("user_id", userID),
+				slog.Int("groups_count", 0),
+				slog.Int("grants_count", 0),
+			)
+		} else {
+			logger.InfoContext(ctx, "returning groups claim",
+				slog.String("email", email),
+				slog.String("user_id", userID),
+				slog.Int("groups_count", len(groups)),
+				slog.Int("grants_count", grantsCount),
+			)
+		}
 
 		return c.Status(fiber.StatusOK).JSON(setClaimsResponse{
 			AppendClaims: []*appendClaim{

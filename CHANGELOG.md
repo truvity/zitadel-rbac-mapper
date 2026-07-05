@@ -2,6 +2,13 @@
 
 All notable changes to zitadel-rbac-mapper are documented here.
 
+## [0.14.0] — 2026-07-05
+
+### Added
+- Per-request enrichment diagnostics on `/webhook`: one structured log line per request with the user email, resolved `groups_count`, and rule-matched `grants_count`
+- Zero-group resolutions now log at WARN ("user resolved to 0 groups — identity may lack google-group membership") instead of a silent empty-claims 200, making misconfigured/personal identities diagnosable from logs
+- Unit tests for the webhook handler covering the INFO (groups resolved) and WARN (zero groups) log paths
+
 ## [0.13.0] — 2026-07-04
 
 ### Changed
