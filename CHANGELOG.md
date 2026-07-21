@@ -2,6 +2,28 @@
 
 All notable changes to zitadel-rbac-mapper are documented here.
 
+## [Unreleased]
+
+### Changed — **BREAKING: v2 org-aware router**
+
+One mapper deployment now serves one Zitadel instance hosting one org per
+legal entity. See `docs/MIGRATION-v2.md` for the config migration.
+
+- **v2 config schema** keyed by Zitadel org ID: per org → resolver URL + rules (`config.example.yaml`); env `RULES_FILE` → `CONFIG_FILE`, new `CONFIG_SSM_PARAM` (Lambda); `GROUPS_RESOLVER_URL` and `RULES_CACHE_TTL` removed
+- **Org-aware routing**: the user's org from the verified webhook payload selects the resolver + rules; per-org resolvers share one HTTP contract (google-group-sync / entra-group-sync)
+- **Fail-closed unknown orgs**: successful empty-claims response (login never fails), warn log with org ID, `rbac_mapper_unknown_org_total` metric
+- **Per-org bulkheads**: per-org HTTP clients with independent timeouts, bounded fail-fast concurrency, and a circuit breaker (sony/gobreaker) — one org's resolver outage cannot affect another org
+- **Pattern grants**: `rolePatterns` globs expand against the actual project roles, fetched via the Management API and cached per `roleCacheTTL` (default 5m); exact `roles` keys pass through verbatim
+- **ProjectGrant-aware UserGrant sync**: grants on projects received via ProjectGrant automatically carry the `projectGrantId`; delta-only sync preserved
+- **Prometheus metrics** with per-org labels on `GET /metrics` (health port)
+- **JWT verification** now also rejects payloads with an expired `exp` claim
+- Legacy Org Metadata rules source (`rbac/*` keys) removed
+- Helm chart: `rules` values → `orgsConfig` (raw v2 document), `env.CONFIG_FILE`, ConfigMap renamed to `-config`
+
+### Added
+- Hermetic integration harness (`tests/integration`, `just test-integration`, runs in CI): fake Zitadel (gRPC Management API + JWKS-signed webhook payloads) and per-org fake resolvers; covers org routing, fail-closed, bulkhead isolation, circuit-breaker recovery, pattern expansion + cache TTL, ProjectGrant-aware sync, idempotent re-sync, JWT rejection, batch /sync
+- Real-instance tests moved to `tests/e2e` (`just test-e2e`)
+
 ## [0.14.0] — 2026-07-05
 
 ### Added

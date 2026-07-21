@@ -24,11 +24,12 @@ resources:
     memory: 128Mi
 
 # Environment variables for the mapper.
+# Per-org settings (resolver URLs, rules, bulkhead/circuit breaker) live in
+# the v2 config file (see orgsConfig below), not in the environment.
 env:
-  GROUPS_RESOLVER_URL: ""
   ZITADEL_DOMAIN: ""
   ZITADEL_PORT: "443"
-  RULES_FILE: "/etc/config/rules.yaml"
+  CONFIG_FILE: "/etc/config/config.yaml"
   PORT: "8080"
   HEALTH_PORT: "7070"
   LOG_LEVEL: "info"
@@ -48,30 +49,23 @@ zitadelKey:
   # Mount path inside the container.
   mountPath: "/etc/secrets/zitadel-key.json"
 
-# Mapping rules (mounted as ConfigMap at /etc/config/rules.yaml).
-# Two formats supported:
+# v2 org-aware config (mounted as ConfigMap at /etc/config/config.yaml).
+# The raw document is rendered verbatim — see config.example.yaml in the repo.
 #
-# Format 1 (structured — preferred for Helm values):
-#   rules:
-#     orgId: "378861397431332737"
-#     orgName: "Truvity B.V."
-#     entries:
-#       - group: platform-admins@example.com
-#         grants:
-#           - project: "376393789184419014"
-#             roles: [admin]
-#
-# Format 2 (raw — pass the orgs[] structure directly):
-#   rules:
+#   orgsConfig:
+#     roleCacheTTL: 5m
 #     orgs:
-#       - id: "378861397431332737"
+#       "376393772658861254":
 #         name: "Truvity B.V."
+#         resolver:
+#           url: "http://google-group-sync.zitadel-rbac-mapper.svc:8080"
 #         rules:
 #           - group: platform-admins@example.com
 #             grants:
 #               - project: "376393789184419014"
-#                 roles: [admin]
-rules: {}
+#                 roles: ["cluster:admin"]
+#                 rolePatterns: ["dmsplus:*"]
+orgsConfig: {}
 
 # Sync API key (used by CronJob and external schedulers).
 syncAPIKey: ""
@@ -87,11 +81,6 @@ cronJob:
       memory: 64Mi
     limits:
       memory: 128Mi
-
-# google-group-sync Service URL (K8s mode — calls the separate Deployment).
-groupSync:
-  serviceURL: ""
-  # e.g., http://google-group-sync.zitadel-rbac-mapper.svc:8080
 
 # Optional HTTPRoute (Envoy Gateway) — default off.
 # The webhook is the one external surface (called by Zitadel Actions).

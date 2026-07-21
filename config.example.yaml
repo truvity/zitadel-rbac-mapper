@@ -1,0 +1,87 @@
+# zitadel-rbac-mapper v2 configuration (org-aware router).
+#
+# One Zitadel instance hosts one org per legal entity. This file maps each
+# org ID to its directory resolver and its group→grant rules. Users from orgs
+# NOT listed here get no enrichment (fail-closed: successful empty-claims
+# response, warn log, rbac_mapper_unknown_org_total metric).
+#
+# Mounted via ConfigMap in K8s (CONFIG_FILE env, default chart path
+# /etc/config/config.yaml) or stored in SSM Parameter Store for Lambda
+# (CONFIG_SSM_PARAM env). YAML and JSON are both accepted.
+
+# TTL of the Zitadel role catalog cache (project roles + project grants),
+# used for rolePatterns expansion and projectGrantId resolution.
+# Staleness semantics: a role added or removed in Zitadel is picked up after
+# at most this TTL; users see the change at their next login after that.
+# Optional, default 5m.
+roleCacheTTL: 5m
+
+orgs:
+  # Zitadel organization ID (the resource owner of the logging-in user).
+  "376393772658861254":
+    # Human-readable name, used in logs only.
+    name: "Truvity B.V. (TP)"
+
+    # The directory-groups resolver for this org. google-group-sync (Google
+    # Workspace) and entra-group-sync (Microsoft Entra) share the same HTTP
+    # contract: GET /users/{email}/groups → {"groups": ["..."]}.
+    resolver:
+      url: "http://google-group-sync.zitadel-rbac-mapper.svc:8080"
+
+      # Per-request HTTP timeout for this org's resolver. Optional, default 5s.
+      timeout: 5s
+
+      # Bulkhead: max in-flight resolver requests for this org. Requests
+      # beyond the bound fail fast (login proceeds with empty claims) instead
+      # of queueing, so one org's slow resolver can't exhaust the mapper.
+      # Optional, default 8.
+      maxConcurrency: 8
+
+      # Circuit breaker for this org's resolver.
+      circuitBreaker:
+        # Consecutive failures that open the circuit. Optional, default 5.
+        failureThreshold: 5
+        # How long the circuit stays open before probing. Optional, default 30s.
+        openDuration: 30s
+        # Probe requests allowed in half-open state. Optional, default 1.
+        halfOpenProbes: 1
+
+    # Group → grant rules. Role KEYS become k8s groups downstream — exact
+    # fidelity matters, they are passed through verbatim.
+    rules:
+      - group: "engineering-admin@truvity.com"
+        grants:
+          # Target Zitadel project ID. May be owned by this org, or owned by
+          # the Platform org and shared via a ProjectGrant — the mapper
+          # resolves the projectGrantId automatically.
+          - project: "376393789184419014"
+            # Exact role keys (verbatim, even if currently absent in Zitadel).
+            roles: ["cluster:admin"]
+
+      - group: "dmsplus-developers@truvity.com"
+        grants:
+          - project: "376393789184419014"
+            # Glob patterns (path.Match: `*`, `?`, `[...]`) expanded against
+            # the roles that actually exist on the project (cached with
+            # roleCacheTTL). E.g. matches dmsplus:deployer, dmsplus:viewer.
+            rolePatterns: ["dmsplus:*"]
+
+      - group: "csbi-viewers@truvity.com"
+        grants:
+          - project: "376393789184419014"
+            # roles and rolePatterns can be combined.
+            roles: ["csbi-tp:viewer"]
+            rolePatterns: ["csbi-*:viewer"]
+
+  "398765432109876543":
+    name: "Digimarc (DG)"
+    resolver:
+      # Different directory: Microsoft Entra via entra-group-sync
+      # (same resolver HTTP contract).
+      url: "http://entra-group-sync.zitadel-rbac-mapper.svc:8080"
+      timeout: 10s
+    rules:
+      - group: "cluster-admins"
+        grants:
+          - project: "376393789184419014"
+            rolePatterns: ["*-dg:*"]
