@@ -43,8 +43,8 @@ spec:
               resources:
                 {{- toYaml .Values.cronJob.resources | nindent 16 }}
               volumeMounts:
-                {{- if .Values.rules }}
-                - name: rules
+                {{- if .Values.orgsConfig }}
+                - name: config
                   mountPath: /etc/config
                   readOnly: true
                 {{- end }}
@@ -54,10 +54,10 @@ spec:
                   readOnly: true
                 {{- end }}
           volumes:
-            {{- if .Values.rules }}
-            - name: rules
+            {{- if .Values.orgsConfig }}
+            - name: config
               configMap:
-                name: {{ include "zitadel-rbac-mapper.fullname" . }}-rules
+                name: {{ include "zitadel-rbac-mapper.fullname" . }}-config
             {{- end }}
             {{- if .Values.zitadelKey.secretName }}
             - name: zitadel-key

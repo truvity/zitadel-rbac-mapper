@@ -14,7 +14,7 @@ spec:
       labels:
         {{- include "zitadel-rbac-mapper.selectorLabels" . | nindent 8 }}
       annotations:
-        checksum/rules: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name | default (include "zitadel-rbac-mapper.fullname" .) }}
       containers:
@@ -60,8 +60,8 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            {{- if .Values.rules }}
-            - name: rules
+            {{- if .Values.orgsConfig }}
+            - name: config
               mountPath: /etc/config
               readOnly: true
             {{- end }}
@@ -71,10 +71,10 @@ spec:
               readOnly: true
             {{- end }}
       volumes:
-        {{- if .Values.rules }}
-        - name: rules
+        {{- if .Values.orgsConfig }}
+        - name: config
           configMap:
-            name: {{ include "zitadel-rbac-mapper.fullname" . }}-rules
+            name: {{ include "zitadel-rbac-mapper.fullname" . }}-config
         {{- end }}
         {{- if .Values.zitadelKey.secretName }}
         - name: zitadel-key

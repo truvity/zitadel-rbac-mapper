@@ -1,19 +1,11 @@
-{{- if .Values.rules }}
+{{- if .Values.orgsConfig }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "zitadel-rbac-mapper.fullname" . }}-rules
+  name: {{ include "zitadel-rbac-mapper.fullname" . }}-config
   labels:
     {{- include "zitadel-rbac-mapper.labels" . | nindent 4 }}
 data:
-  rules.yaml: |
-    {{- if .Values.rules.orgs }}
-    {{- .Values.rules | toYaml | nindent 4 }}
-    {{- else }}
-    orgs:
-      - id: {{ .Values.rules.orgId | default "" | quote }}
-        name: {{ .Values.rules.orgName | default "" | quote }}
-        rules:
-        {{- .Values.rules.entries | toYaml | nindent 8 }}
-    {{- end }}
+  config.yaml: |
+    {{- .Values.orgsConfig | toYaml | nindent 4 }}
 {{- end }}
