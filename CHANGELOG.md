@@ -4,6 +4,8 @@ All notable changes to zitadel-rbac-mapper are documented here.
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-22
+
 ### Changed — **BREAKING: v2 org-aware router**
 
 One mapper deployment now serves one Zitadel instance hosting one org per
