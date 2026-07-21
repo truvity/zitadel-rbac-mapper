@@ -125,15 +125,24 @@ func TestUnknownOrg_FailsClosed(t *testing.T) {
 	}
 }
 
-func TestMissingOrgInPayload_FailsClosed(t *testing.T) {
+// TestMissingOrgInPayload_UnknownUser_FailsClosed: a payload without an org
+// triggers a Management API lookup (GetUserByID → resource owner); when the
+// user is unknown, the lookup fails and the request fails closed.
+func TestMissingOrgInPayload_UnknownUser_FailsClosed(t *testing.T) {
 	fz := newFakeZitadel(t)
 	resolverA := newFakeResolver(t, nil)
 	resolverB := newFakeResolver(t, nil)
 
 	s := newStack(t, fz, twoOrgConfig(resolverA.url(), resolverB.url()))
 
+	// user-x exists in no org of the fake instance → lookup fails.
 	groups := s.login("user-x", "x@company-a.com", "")
 	if len(groups) != 0 {
 		t.Fatalf("expected empty groups claim for payload without org, got %v", groups)
+	}
+
+	got := testutil.ToFloat64(s.metrics.OrgSource.WithLabelValues("unknown", "lookup_failed"))
+	if got != 1 {
+		t.Errorf("org_source{lookup_failed} = %v, want 1", got)
 	}
 }

@@ -5,6 +5,7 @@ package integration
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -94,6 +95,141 @@ func TestJWT_ExpiredRejected(t *testing.T) {
 	resp, respBody := s.postWebhook(body)
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expired JWT: got %d (%s), want 401", resp.StatusCode, string(respBody))
+	}
+}
+
+// payloadWithoutExp builds an otherwise-valid Actions V2 payload that carries
+// no exp claim.
+func payloadWithoutExp(userID, email, orgID string) []byte {
+	payload := map[string]any{
+		"function": "function/preuserinfo",
+		"user": map[string]any{
+			"id":       userID,
+			"username": email,
+			"human":    map[string]any{"email": email},
+		},
+		"org": map[string]any{"id": orgID},
+	}
+
+	b, _ := json.Marshal(payload)
+
+	return b
+}
+
+// TestJWT_AlgNoneRejected: an unsigned token declaring alg "none" must never
+// verify, regardless of payload contents.
+func TestJWT_AlgNoneRejected(t *testing.T) {
+	fz := newFakeZitadel(t)
+	res := newFakeResolver(t, nil)
+	s := newStack(t, fz, minimalConfig(res.url()))
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload := base64.RawURLEncoding.EncodeToString(webhookPayload("u1", "a@corp.com", "org-a"))
+	token := header + "." + payload + "."
+
+	resp, _ := s.postRaw([]byte(token))
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("alg=none token: got %d, want 401", resp.StatusCode)
+	}
+
+	if res.calls.Load() != 0 {
+		t.Error("resolver must not be called for unverified payloads")
+	}
+}
+
+// TestJWT_HMACConfusionRejected: signing with HS256 using key material derived
+// from the published RSA key (the classic algorithm-confusion attack) must be
+// rejected by the algorithm pinning — only the RS256 family is accepted.
+func TestJWT_HMACConfusionRejected(t *testing.T) {
+	fz := newFakeZitadel(t)
+	res := newFakeResolver(t, nil)
+	s := newStack(t, fz, minimalConfig(res.url()))
+
+	// Attacker-side: a symmetric key claiming the instance key's kid.
+	symKey, err := jwk.Import[jwk.Key]([]byte("attacker-derived-secret-material"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_ = symKey.Set(jwk.KeyIDKey, "test-key-1")
+
+	signed, err := jws.Sign(webhookPayload("u1", "a@corp.com", "org-a"), jws.WithKey(jwa.HS256(), symKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, _ := s.postRaw(signed)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("HS256 confusion token: got %d, want 401", resp.StatusCode)
+	}
+
+	if res.calls.Load() != 0 {
+		t.Error("resolver must not be called for unverified payloads")
+	}
+}
+
+// TestJWT_MissingExpRejectedByDefault: security.requireExp defaults to true —
+// a correctly signed payload without an exp claim is rejected.
+func TestJWT_MissingExpRejectedByDefault(t *testing.T) {
+	fz := newFakeZitadel(t)
+	res := newFakeResolver(t, nil)
+	s := newStack(t, fz, minimalConfig(res.url()))
+
+	resp, body := s.postWebhook(payloadWithoutExp("u1", "a@corp.com", "org-a"))
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing-exp payload: got %d (%s), want 401", resp.StatusCode, string(body))
+	}
+}
+
+// TestJWT_MissingExpAcceptedWhenDisabled: the migration escape hatch —
+// security.requireExp: false accepts payloads without exp (for instances
+// whose Actions payloads are verified to lack the claim).
+func TestJWT_MissingExpAcceptedWhenDisabled(t *testing.T) {
+	fz := newFakeZitadel(t)
+	res := newFakeResolver(t, map[string][]string{"a@corp.com": {"eng@corp.com"}})
+
+	config := fmt.Sprintf(`
+security:
+  requireExp: false
+orgs:
+  "org-a":
+    name: "Company A"
+    resolver:
+      url: %q
+    rules: []
+`, res.url())
+
+	s := newStack(t, fz, config)
+
+	resp, body := s.postWebhook(payloadWithoutExp("u1", "a@corp.com", "org-a"))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("missing-exp payload with requireExp=false: got %d (%s), want 200", resp.StatusCode, string(body))
+	}
+
+	if groups := groupsClaim(t, body); len(groups) != 1 {
+		t.Errorf("expected enrichment, got %v", groups)
+	}
+}
+
+// TestJWKSRotation_NoRestartNeeded: after the instance rotates its signing
+// key, the verifier refetches the JWKS on the unknown kid and keeps verifying
+// — the old "restart the pods after rotation" runbook step is gone.
+func TestJWKSRotation_NoRestartNeeded(t *testing.T) {
+	fz := newFakeZitadel(t)
+	res := newFakeResolver(t, map[string][]string{"a@corp.com": {"eng@corp.com"}})
+	s := newStack(t, fz, minimalConfig(res.url()))
+
+	// Warm the verifier's JWKS cache with the original key.
+	if groups := s.login("u1", "a@corp.com", "org-a"); len(groups) != 1 {
+		t.Fatalf("pre-rotation login: got %v", groups)
+	}
+
+	// Zitadel rotates its signing key.
+	fz.rotateKey(t)
+
+	// Tokens signed by the new key verify without a process restart.
+	if groups := s.login("u1", "a@corp.com", "org-a"); len(groups) != 1 {
+		t.Fatalf("post-rotation login: got %v", groups)
 	}
 }
 

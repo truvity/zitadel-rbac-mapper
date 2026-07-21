@@ -150,17 +150,13 @@ orgs:
 }
 
 // TestZeroRulesOrg_LoginMustNotPruneExistingGrants: an org configured with an
-// empty rules list. Batch /sync deliberately skips such orgs
-// (pkg/reconcile/reconcile.go:162 — `len(org.Rules) == 0` guard), i.e. the
-// mapper claims no pruning authority when no rules are configured. The login
-// webhook must behave consistently: enrich the groups claim, but never wipe
-// grants that exist in Zitadel.
+// empty rules list. Batch /sync deliberately skips such orgs (the
+// `len(org.Rules) == 0` guard in reconcile.All), i.e. the mapper claims no
+// pruning authority when no rules are configured. The login webhook behaves
+// consistently: it enriches the groups claim but skips grant sync entirely
+// (zitadel_handler gates on len(org.Rules) > 0), so grants that exist in
+// Zitadel are never wiped by a zero-rules login.
 func TestZeroRulesOrg_LoginMustNotPruneExistingGrants(t *testing.T) {
-	t.Skip("KNOWN BUG (PR #26 QA finding): pkg/server/zitadel_handler.go:176 runs grant sync for zero-rules orgs; " +
-		"desired state is always empty, so every login wipes ALL of the user's grants in that org. " +
-		"reconcile.All (pkg/reconcile/reconcile.go:162) deliberately skips zero-rules orgs — the webhook path must too. " +
-		"Suggested fix: gate syncGrants on len(org.Rules) > 0. Un-skip this test once fixed.")
-
 	fz := newFakeZitadel(t)
 	fz.setOwnedProject("org-a", "proj-a", "cluster:admin")
 
