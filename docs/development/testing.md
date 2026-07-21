@@ -24,11 +24,14 @@ enforces real ProjectGrant semantics) and a JWKS endpoint whose key signs the
 webhook payloads; per-org fake resolvers implement the google-group-sync
 contract with controllable latency and failure modes.
 
-Covered end to end: org routing, fail-closed unknown orgs, bulkhead
-isolation under a hanging resolver, circuit-breaker open/short-circuit/
-recovery, pattern expansion and catalog TTL, ProjectGrant-aware sync,
-idempotent re-delivery, JWT rejection (malformed/wrong key/expired), and
-batch `/sync` including pruning.
+Covered end to end: org routing (including org lookup for payloads without
+an org), fail-closed unknown orgs, bulkhead isolation under a hanging
+resolver, circuit-breaker open/short-circuit/recovery, pattern expansion
+(with `protectedRoles`) and catalog TTL, ProjectGrant-aware sync with grant
+pagination, idempotent re-delivery, JWT rejection (malformed/wrong key/
+expired/`alg:none`/HMAC-confusion/missing `exp`) plus JWKS rotation without
+restart, and batch `/sync` including pruning, empty-resolution skips, the
+mass-empty abort, and the `force=true` override.
 
 The harness, fakes, and full scenario table are documented in
 [`tests/integration/README.md`](../../tests/integration/README.md) — keep

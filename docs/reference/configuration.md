@@ -14,13 +14,15 @@ missing required variable.
 | --- | --- | --- | --- |
 | `ZITADEL_DOMAIN` | yes | — | Zitadel instance domain (e.g. `auth.example.com`). Used for the Management API connection and to derive the JWKS URL (`https://<domain>/oauth/v2/keys`). |
 | `ZITADEL_PORT` | no | `443` | Zitadel gRPC port. |
-| `ZITADEL_KEY_JSON` | yes | — | MachineUser JWT key **JSON content** (not a path) for Management API auth. |
-| `SYNC_API_KEY` | yes | — | Bearer token protecting `POST /sync`. Required even in `sync`-subcommand mode (config validation is shared). |
+| `ZITADEL_KEY_JSON` | one of | — | MachineUser JWT key **JSON content** (not a path) for Management API auth. |
+| `ZITADEL_KEY_FILE` | one of | — | Path to a file containing the MachineUser key JSON (chart `zitadelKey.*` Secret mount). Read only when `ZITADEL_KEY_JSON` is unset — the env var wins if both are set. One of the two is required. |
+| `SYNC_API_KEY` | yes | — | Bearer token protecting `POST /sync` (compared constant-time; an empty key rejects all requests). Required even in `sync`-subcommand mode (config validation is shared). |
 | `CONFIG_FILE` | one of | — | Path to the v2 config document (K8s: ConfigMap mount, chart default `/etc/config/config.yaml`). |
 | `CONFIG_SSM_PARAM` | one of | — | SSM parameter name holding the v2 config document (Lambda mode). Exactly one of `CONFIG_FILE`/`CONFIG_SSM_PARAM` must be set; `CONFIG_FILE` wins if both are. |
-| `PORT` | no | `8080` | Main HTTP port (`/webhook`, `/sync`, `/health`). |
+| `PORT` | no | `8080` | Main HTTP port (`/webhook`, `/sync`, `/health`). Request bodies are capped at 1 MiB. |
 | `HEALTH_PORT` | no | `7070` | Health/metrics port (`/health`, `/metrics`). |
-| `LOG_FORMAT` | no | `json` | `json` or `text` (slog handler). Log level is fixed at INFO. |
+| `LOG_FORMAT` | no | `json` | `json` or `text` (slog handler). |
+| `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn` or `error`. Emails on the webhook hot path are logged at `debug` only. |
 
 Lambda entry point only (`cmd/zitadel-rbac-mapper-lambda`):
 
@@ -37,6 +39,11 @@ Go syntax (`5s`, `30s`, `5m`).
 
 ```yaml
 roleCacheTTL: 5m
+security:
+  requireExp: true
+sync:
+  maxEmptyRatio: 0.2
+protectedRoles: ["cluster:admin"]
 orgs:
   "<zitadel-org-id>":
     name: "Company name"
@@ -61,6 +68,9 @@ orgs:
 | Field | Type | Default | Constraints / semantics |
 | --- | --- | --- | --- |
 | `roleCacheTTL` | duration | `5m` | TTL of the [role catalog](../architecture/role-catalog.md) (pattern expansion, `projectGrantId` resolution). Bounds role-change staleness; shorter = fresher + more Management API traffic. Read live per lookup — a config reload changes it without restart. |
+| `security.requireExp` | bool | `true` | Reject webhook JWT payloads that carry no `exp` claim. Set to `false` **only** after verifying during rollout that a live instance's Actions payloads lack `exp` ([migration](../MIGRATION-v2.md#behavior-changes)). |
+| `sync.maxEmptyRatio` | float | `0.2` | Batch-sync safety threshold: abort the run before any pruning when more than this fraction of successfully resolved users come back with zero groups. Range `[0,1]`. See [pruning authority](../operations/runbook.md#pruning-authority-precisely). |
+| `protectedRoles` | list of strings | `[]` | Role keys that are **never granted via `rolePatterns` expansion** — only via explicit `roles`. The guardrail for broad patterns (see the warning under `rolePatterns` below). Global — applies to every org and project. |
 | `orgs` | map | — | Keyed by **Zitadel organization ID** (the resource owner of the logging-in user). Empty-string keys are rejected. Users from orgs absent here get no enrichment — fail-closed. |
 
 ### `orgs.<id>`
@@ -69,7 +79,7 @@ orgs:
 | --- | --- | --- | --- |
 | `name` | string | `""` | Human-readable, used in logs only. |
 | `resolver` | object | — | The org's directory-groups resolver (below). |
-| `rules` | list | `[]` | Group → grant rules (below). An org with an empty rule list is still "configured": logins get the groups claim, and — careful — a login that resolves groups syncs against an empty desired set, **pruning any existing grants** the user has. Batch sync skips zero-rule orgs. |
+| `rules` | list | `[]` | Group → grant rules (below). An org with an empty rule list is still "configured": logins get the groups claim, but **grant sync is skipped entirely** — a zero-rules org claims no grant authority, so existing grants are never touched (both the login path and batch sync skip such orgs). |
 
 ### `orgs.<id>.resolver`
 
@@ -97,10 +107,19 @@ Semantics of the bulkhead and breaker: [per-org isolation](../architecture/isola
 | --- | --- | --- |
 | `project` | string | **Required.** Zitadel project **ID** (not name). May be owned by this org, or owned by another org and shared via ProjectGrant — the mapper resolves the `projectGrantId` automatically. |
 | `roles` | list of strings | Exact role keys, passed through **verbatim** — granted even if absent from the live project (role keys are the Kubernetes RBAC group names downstream; exact fidelity matters). |
-| `rolePatterns` | list of strings | Globs in Go `path.Match` syntax (`*`, `?`, `[...]`; no `**`), expanded against the role keys that exist on the project per the role catalog. Syntax is validated at load; a malformed pattern rejects the whole document. |
+| `rolePatterns` | list of strings | Globs in Go `path.Match` syntax (`*`, `?`, `[...]`; no `**`), expanded against the role keys that exist on the project per the role catalog. Syntax is validated at load; a malformed pattern rejects the whole document. **See the separator warning below.** |
 
 At least one of `roles` / `rolePatterns` must be non-empty per grant; both
 may be combined.
+
+> **⚠️ `path.Match` treats only `/` as a separator — `:` is an ordinary
+> character.** Role keys conventionally use `:` (e.g. `cluster:admin`,
+> `dmsplus:deployer`), so `*` is NOT bounded at the colon: a bare `*`
+> matches **every role key on the project, including `cluster:admin`**, and
+> `dmsplus*` matches `dmsplus-legacy:admin` too. Write patterns with an
+> explicit prefix (`dmsplus:*`) and list sensitive keys in the top-level
+> `protectedRoles` — protected keys are excluded from all pattern expansion
+> and grantable only via explicit `roles`.
 
 ### Pattern-grant semantics, precisely
 
@@ -144,8 +163,10 @@ list** — not just rule-matched groups. For users in many groups this inflates
 every ID/access token, and oversized tokens hit real limits downstream
 (HTTP header caps in proxies and the Kubernetes API server's OIDC handling).
 
-- Watch the `groups_count` field on the per-request log lines; there is
-  currently no size metric ([metrics](../operations/metrics.md#gaps)).
+- Watch the `rbac_mapper_groups_claim_entries` / `_bytes` histograms (per
+  org) and the suggested token-bloat alert
+  ([metrics](../operations/metrics.md#suggested-alerts)); the `groups_count`
+  field on per-request log lines carries the same signal.
 - As a rule of thumb, keep resolved groups per user in the low dozens; group
   emails at ~30–40 bytes each put a 100-group user's claim at several KB
   before base64 overhead.

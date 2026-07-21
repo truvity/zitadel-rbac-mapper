@@ -25,6 +25,8 @@ rules. Users from orgs without a config entry get **no enrichment**
 | — | `CONFIG_SSM_PARAM` | Lambda mode: SSM parameter holding the v2 config |
 | `GROUPS_RESOLVER_URL` | *(removed)* | Resolver URLs are per-org in the config file |
 | `RULES_CACHE_TTL` | *(removed)* | Org Metadata rules source was removed; the new `roleCacheTTL` (role catalog) lives in the config file |
+| — | `ZITADEL_KEY_FILE` | New alternative to `ZITADEL_KEY_JSON`: path to the key JSON file (chart `zitadelKey.*` mount); the env var wins if both are set |
+| — | `LOG_LEVEL` | New: `debug`\|`info`\|`warn`\|`error` (default `info`). Emails on the webhook hot path are logged at `debug` only |
 | `ZITADEL_DOMAIN`, `ZITADEL_PORT`, `ZITADEL_KEY_JSON`, `SYNC_API_KEY`, `PORT`, `HEALTH_PORT`, `LOG_FORMAT` | unchanged | |
 
 The legacy Org Metadata rules source (`rbac/*` org metadata keys) is gone.
@@ -99,8 +101,42 @@ Migration steps per org entry:
 - **Metrics**: new Prometheus endpoint on the health port (`GET /metrics`)
   with per-org labels. See the [metrics reference](operations/metrics.md)
   for the full catalog and suggested alerts.
-- **JWT verification** additionally rejects payloads whose `exp` claim is
-  more than 60 seconds in the past (previously signature-only).
+- **JWT verification is stricter** (previously signature-only):
+  - Accepted algorithms are pinned to the RS256 family (RS256/RS384/RS512);
+    `alg: none` and HMAC tokens are rejected outright.
+  - Payloads whose `exp` claim is more than 60 seconds in the past are
+    rejected.
+  - Payloads **without** an `exp` claim are rejected by default
+    (`security.requireExp: true`). **Escape hatch:** if webhook requests
+    fail with `payload carries no exp claim` during rollout — i.e. your
+    instance's Actions payloads verifiably lack `exp` — set
+    `security.requireExp: false` in the config document (hot-reloadable via
+    `POST /sync`) and file it as a follow-up to re-enable once the payloads
+    carry `exp`. Verify the actual payload shape during rollout before
+    weakening this.
+  - The JWKS is auto-refreshed (periodically, and immediately on an unknown
+    key ID, rate-limited to 1/min): **no pod restart after Zitadel
+    signing-key rotation** anymore.
+- **Payloads without an org are enriched via lookup**: `preaccesstoken`
+  payloads may carry `user.id` but no org. v2 resolves the org via the
+  Management API (GetUserByID → resource owner, cached ~5m) and then applies
+  normal routing; a failed lookup or an unconfigured org still fails closed.
+  Observable via `rbac_mapper_webhook_org_source_total{source=...}`.
+- **Zero-rules orgs never touch grants**: an org configured with `rules: []`
+  gets groups-claim enrichment but grant sync is skipped entirely — on both
+  the login and batch paths.
+- **Batch-sync pruning is guarded**: users who resolve to zero groups are
+  skipped (counted as `users_skipped_empty`), and a run where more than
+  `sync.maxEmptyRatio` (default 0.2) of resolved users come back empty
+  aborts before any write. Full offboarding is handled by user
+  deactivation/org removal — or the explicit `POST /sync?force=true`
+  override. See the [runbook](operations/runbook.md#pruning-authority-precisely).
+- **`protectedRoles` guardrail**: role keys listed in the new global
+  `protectedRoles` are never granted via `rolePatterns` expansion (a bare
+  `*` matches every role key — `:` is not a `path.Match` separator), only
+  via explicit `roles`.
+- **Chart HTTPRoute exposes `/webhook` only** by default; `/sync` and
+  `/health` stay cluster-internal (override `httpRoute.rules` if needed).
 
 ## After the rollout
 

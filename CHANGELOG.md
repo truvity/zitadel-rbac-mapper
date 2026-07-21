@@ -20,6 +20,28 @@ legal entity. See `docs/MIGRATION-v2.md` for the config migration.
 - Legacy Org Metadata rules source (`rbac/*` keys) removed
 - Helm chart: `rules` values → `orgsConfig` (raw v2 document), `env.CONFIG_FILE`, ConfigMap renamed to `-config`
 
+### Security (review-fix round, PR #26)
+- **Zero-rules orgs never prune**: the login webhook now skips grant sync when an org has no rules (previously every login through a zero-rules org wiped ALL of the user's grants in that org — desired state was always empty); mirrors the batch-sync guard
+- **Batch /sync mass-prune guardrails**: users resolving to zero groups are skipped (`users_skipped_empty` in the summary) instead of pruned; a run aborts before any write when the empty share exceeds `sync.maxEmptyRatio` (config, default 0.2; `rbac_mapper_sync_aborts_total` metric). Explicit offboarding: `POST /sync?force=true` overrides both
+- **/sync Bearer comparison is constant-time** (`crypto/subtle`); an empty configured `SYNC_API_KEY` rejects all requests
+- **JWT algorithm pinning**: only RS256/RS384/RS512 accepted — `alg:none` and HMAC key-confusion tokens rejected before verification
+- **`security.requireExp`** (default true): payloads without an `exp` claim are rejected; escape hatch documented in `docs/MIGRATION-v2.md`
+- **`protectedRoles`** (global config list): role keys never granted via `rolePatterns` expansion (`path.Match` treats `:` as an ordinary character — `*` matches every role key), only via explicit `roles`
+- Chart HTTPRoute default rule now matches `/webhook` only; `/sync` and `/health` stay cluster-internal
+
+### Fixed
+- **JWKS lifetime cache** replaced with an auto-refreshing one (periodic 15m refresh + unknown-`kid` refetch rate-limited to 1/min): no pod restart needed after Zitadel signing-key rotation
+- **`listUserGrants` pagination**: users holding >100 grants had the tail invisible to sync (stale grants never pruned, "missing" grants re-added)
+- **Payloads without `org` (preaccesstoken) are now enriched**: the org is resolved via Management API GetUserByID (resource owner, cached ~5m) and normal routing applies; failed lookup/unconfigured org still fail closed (`rbac_mapper_webhook_org_source_total{source=payload|lookup|lookup_failed}`)
+- `ZITADEL_KEY_FILE` is now read by the binary (key JSON from file; `ZITADEL_KEY_JSON` wins if both) — the chart's `zitadelKey.*` Secret mount works
+- `LOG_LEVEL` env is now honored (`debug|info|warn|error`, default `info`)
+
+### Changed (telemetry hygiene)
+- Emails are logged at `debug` level only on the webhook hot path; INFO/WARN request lines carry `user_id`
+- `/sync` problem responses return generic details; full errors go to server logs
+- Explicit Fiber `BodyLimit` (1 MiB) on the main listener
+- New metrics: `rbac_mapper_groups_claim_entries` / `rbac_mapper_groups_claim_bytes` histograms (token-bloat signal + suggested alert), `rbac_mapper_webhook_org_source_total`, `rbac_mapper_sync_aborts_total`
+
 ### Added
 - Hermetic integration harness (`tests/integration`, `just test-integration`, runs in CI): fake Zitadel (gRPC Management API + JWKS-signed webhook payloads) and per-org fake resolvers; covers org routing, fail-closed, bulkhead isolation, circuit-breaker recovery, pattern expansion + cache TTL, ProjectGrant-aware sync, idempotent re-sync, JWT rejection, batch /sync
 - Real-instance tests moved to `tests/e2e` (`just test-e2e`)
