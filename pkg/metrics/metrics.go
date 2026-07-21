@@ -35,6 +35,18 @@ const (
 	CircuitOpen     = 2
 )
 
+// Org-source label values (how the webhook determined the user's org).
+const (
+	OrgSourcePayload      = "payload"       // org present in the verified payload
+	OrgSourceLookup       = "lookup"        // resolved via Management API GetUserByID
+	OrgSourceLookupFailed = "lookup_failed" // payload lacked org and the lookup failed (fail-closed)
+)
+
+// Sync abort reason label values.
+const (
+	SyncAbortEmptyRatio = "empty_ratio" // empty-resolution share exceeded sync.maxEmptyRatio
+)
+
 // Metrics holds all collectors on a private registry.
 type Metrics struct {
 	registry *prometheus.Registry
@@ -62,6 +74,21 @@ type Metrics struct {
 
 	// RoleCatalogRefresh counts role-catalog refreshes by org and outcome.
 	RoleCatalogRefresh *prometheus.CounterVec
+
+	// OrgSource counts how the webhook determined the user's org
+	// (payload | lookup | lookup_failed).
+	OrgSource *prometheus.CounterVec
+
+	// SyncAborts counts batch-sync runs aborted by a safety threshold.
+	SyncAborts *prometheus.CounterVec
+
+	// GroupsClaimEntries observes the number of entries in the groups claim
+	// returned per webhook response.
+	GroupsClaimEntries *prometheus.HistogramVec
+
+	// GroupsClaimBytes observes the approximate serialized size (bytes) of the
+	// groups claim returned per webhook response.
+	GroupsClaimBytes *prometheus.HistogramVec
 }
 
 // New creates a Metrics instance with its own registry (includes the standard
@@ -108,6 +135,24 @@ func New() *Metrics {
 			Name: "rbac_mapper_role_catalog_refresh_total",
 			Help: "Role-catalog refreshes by org and outcome.",
 		}, []string{"org", "outcome"}),
+		OrgSource: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "rbac_mapper_webhook_org_source_total",
+			Help: "How the webhook determined the user's org (payload | lookup | lookup_failed).",
+		}, []string{"org", "source"}),
+		SyncAborts: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "rbac_mapper_sync_aborts_total",
+			Help: "Batch-sync runs aborted by a safety threshold, by reason.",
+		}, []string{"reason"}),
+		GroupsClaimEntries: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "rbac_mapper_groups_claim_entries",
+			Help:    "Number of entries in the groups claim per webhook response.",
+			Buckets: []float64{0, 1, 2, 5, 10, 20, 50, 100, 200},
+		}, []string{"org"}),
+		GroupsClaimBytes: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name:    "rbac_mapper_groups_claim_bytes",
+			Help:    "Approximate serialized size of the groups claim per webhook response.",
+			Buckets: prometheus.ExponentialBuckets(64, 2, 10),
+		}, []string{"org"}),
 	}
 
 	reg.MustRegister(
@@ -119,6 +164,10 @@ func New() *Metrics {
 		m.GrantSyncOps,
 		m.GrantSyncErrors,
 		m.RoleCatalogRefresh,
+		m.OrgSource,
+		m.SyncAborts,
+		m.GroupsClaimEntries,
+		m.GroupsClaimBytes,
 	)
 
 	return m

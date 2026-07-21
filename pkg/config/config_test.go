@@ -1,6 +1,9 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -8,8 +11,8 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 
 	for _, key := range []string{
-		"ZITADEL_DOMAIN", "ZITADEL_KEY_JSON", "ZITADEL_PORT", "SYNC_API_KEY",
-		"CONFIG_FILE", "CONFIG_SSM_PARAM", "PORT", "HEALTH_PORT", "LOG_FORMAT",
+		"ZITADEL_DOMAIN", "ZITADEL_KEY_JSON", "ZITADEL_KEY_FILE", "ZITADEL_PORT", "SYNC_API_KEY",
+		"CONFIG_FILE", "CONFIG_SSM_PARAM", "PORT", "HEALTH_PORT", "LOG_FORMAT", "LOG_LEVEL",
 	} {
 		t.Setenv(key, "")
 	}
@@ -118,6 +121,99 @@ func TestLoad_CustomPort(t *testing.T) {
 
 	if cfg.HealthPort != 9091 {
 		t.Errorf("got HealthPort=%d, want 9091", cfg.HealthPort)
+	}
+}
+
+func TestLoad_KeyFile(t *testing.T) {
+	clearEnv(t)
+
+	keyPath := filepath.Join(t.TempDir(), "key.json")
+	if err := os.WriteFile(keyPath, []byte(`{"type":"serviceaccount","keyId":"file","key":"k","userId":"u"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
+	t.Setenv("ZITADEL_KEY_FILE", keyPath)
+	t.Setenv("SYNC_API_KEY", "test-key-123")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(cfg.ZitadelKeyJSON, `"keyId":"file"`) {
+		t.Errorf("ZitadelKeyJSON not read from ZITADEL_KEY_FILE: %q", cfg.ZitadelKeyJSON)
+	}
+}
+
+func TestLoad_KeyJSONWinsOverKeyFile(t *testing.T) {
+	clearEnv(t)
+
+	keyPath := filepath.Join(t.TempDir(), "key.json")
+	if err := os.WriteFile(keyPath, []byte(`{"keyId":"file"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
+	t.Setenv("ZITADEL_KEY_JSON", `{"keyId":"env"}`)
+	t.Setenv("ZITADEL_KEY_FILE", keyPath)
+	t.Setenv("SYNC_API_KEY", "test-key-123")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.ZitadelKeyJSON != `{"keyId":"env"}` {
+		t.Errorf("ZITADEL_KEY_JSON must win over ZITADEL_KEY_FILE, got %q", cfg.ZitadelKeyJSON)
+	}
+}
+
+func TestLoad_KeyFileMissing(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
+	t.Setenv("ZITADEL_KEY_FILE", "/nonexistent/key.json")
+	t.Setenv("SYNC_API_KEY", "test-key-123")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for unreadable ZITADEL_KEY_FILE")
+	}
+}
+
+func TestLoad_LogLevel(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
+	t.Setenv("ZITADEL_KEY_JSON", `{"keyId":"1"}`)
+	t.Setenv("SYNC_API_KEY", "test-key-123")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.LogLevel != "info" {
+		t.Errorf("default LogLevel = %q, want info", cfg.LogLevel)
+	}
+
+	t.Setenv("LOG_LEVEL", "debug")
+
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q, want debug", cfg.LogLevel)
+	}
+
+	t.Setenv("LOG_LEVEL", "loud")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected error for invalid LOG_LEVEL")
 	}
 }
 

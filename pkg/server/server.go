@@ -82,6 +82,7 @@ func NewApp(deps *Deps, syncAPIKey string) *fiber.App {
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 60 * time.Second, // sync-all can take a while
 		IdleTimeout:  60 * time.Second,
+		BodyLimit:    1 << 20, // 1 MiB — webhook payloads are small; bound memory per request
 	})
 
 	// Request logging middleware.

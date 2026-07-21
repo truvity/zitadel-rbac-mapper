@@ -38,7 +38,7 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	logger := newLogger(cfg.LogFormat)
+	logger := newLogger(cfg.LogFormat, cfg.LogLevel)
 
 	deps, err := BuildDeps(ctx, logger, cfg, opts)
 	if err != nil {
@@ -91,19 +91,24 @@ func BuildDeps(ctx context.Context, logger *slog.Logger, cfg *config.Config, opt
 
 	m := metrics.New()
 
+	// requireExp is read from the live config source per verification, so a
+	// config change takes effect without restart.
+	verifier := zitadeljwt.New(cfg.ZitadelDomain)
+	verifier.SetRequireExp(func() bool { return source.Settings().RequireExp })
+
 	return &server.Deps{
 		Logger:    logger,
 		Source:    source,
 		Resolvers: resolver.NewRegistry(logger, m),
 		Catalog:   catalog.New(logger, syncer.Client().ManagementService(), source.RoleCacheTTL, m),
 		Syncer:    syncer,
-		Verifier:  zitadeljwt.New(cfg.ZitadelDomain),
+		Verifier:  verifier,
 		Metrics:   m,
 	}, nil
 }
 
-func newLogger(format string) *slog.Logger {
-	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
+func newLogger(format, level string) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: parseLevel(level)}
 
 	var handler slog.Handler
 	if format == "text" {
@@ -113,4 +118,17 @@ func newLogger(format string) *slog.Logger {
 	}
 
 	return slog.New(handler)
+}
+
+func parseLevel(level string) slog.Level {
+	switch level {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
 }

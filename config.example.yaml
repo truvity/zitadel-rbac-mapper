@@ -16,6 +16,28 @@
 # Optional, default 5m.
 roleCacheTTL: 5m
 
+# Instance-global webhook verification settings.
+security:
+  # Reject webhook JWT payloads that carry no `exp` claim. Optional, default
+  # true. Set to false ONLY if you verified during rollout that your
+  # instance's Actions payloads lack exp (see docs/MIGRATION-v2.md).
+  requireExp: true
+
+# Batch-sync (POST /sync, CronJob) safety settings.
+sync:
+  # Abort a batch run before any pruning when more than this fraction of
+  # successfully resolved users come back with ZERO groups — the signature of
+  # a resolver/directory fault, not of genuine group churn. Range [0,1].
+  # Optional, default 0.2.
+  maxEmptyRatio: 0.2
+
+# Role keys that are NEVER granted through rolePatterns expansion — only via
+# explicit `roles` entries. Guardrail for glob patterns: path.Match treats
+# only `/` as a separator, so `:` does NOT bound a pattern — `*` matches
+# EVERY role key on the project, including `cluster:admin`. Optional,
+# default empty.
+protectedRoles: ["cluster:admin"]
+
 orgs:
   # Zitadel organization ID (the resource owner of the logging-in user).
   "376393772658861254":
@@ -64,6 +86,9 @@ orgs:
             # Glob patterns (path.Match: `*`, `?`, `[...]`) expanded against
             # the roles that actually exist on the project (cached with
             # roleCacheTTL). E.g. matches dmsplus:deployer, dmsplus:viewer.
+            # NOTE: `:` is NOT a separator — only `/` is. A bare `*` matches
+            # every role key on the project; list sensitive keys under the
+            # top-level protectedRoles to keep patterns away from them.
             rolePatterns: ["dmsplus:*"]
 
       - group: "csbi-viewers@truvity.com"

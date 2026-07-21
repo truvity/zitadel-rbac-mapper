@@ -58,7 +58,9 @@ const orgLabelUnknown = "unknown"
 // This handler receives Zitadel Actions V2 function payloads (preuserinfo, preaccesstoken)
 // via a restCall target with JWT payload type. It:
 //  1. Verifies the JWT signature using the instance JWKS
-//  2. Determines the user's org from the verified payload and routes to that
+//  2. Determines the user's org from the verified payload (falling back to a
+//     cached Management API lookup — GetUserByID → resource owner — when the
+//     payload lacks an org, as preaccesstoken payloads may) and routes to that
 //     org's configuration; users from unconfigured orgs get NO enrichment
 //     (fail-closed: successful empty-claims response, warn log, metric)
 //  3. Resolves directory groups via the org's resolver (per-org bulkhead
@@ -105,9 +107,34 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 		}
 
 		// Route by the user's org (resource owner) from the verified payload.
+		// Some functions (preaccesstoken) may deliver payloads without an org:
+		// resolve it via the Management API (GetUserByID → resource owner,
+		// cached). A failed lookup leaves orgID empty → fail-closed below.
 		orgID := ""
+		orgSource := metrics.OrgSourcePayload
+
 		if payload.Org != nil {
 			orgID = payload.Org.ID
+		}
+
+		if orgID == "" && payload.User.ID != "" && deps.Syncer != nil {
+			resolved, err := deps.Syncer.UserOrg(ctx, payload.User.ID)
+			if err != nil {
+				logger.WarnContext(ctx, "org lookup for payload without org failed, failing closed",
+					slog.String("user_id", payload.User.ID),
+					slog.String("function", payload.Function),
+					slog.Any("error", err),
+				)
+
+				orgSource = metrics.OrgSourceLookupFailed
+			} else {
+				orgID = resolved
+				orgSource = metrics.OrgSourceLookup
+			}
+		}
+
+		if deps.Metrics != nil {
+			deps.Metrics.OrgSource.WithLabelValues(orgLabel(orgID), orgSource).Inc()
 		}
 
 		org, configured := lookupOrg(ctx, deps.Source, orgID)
@@ -147,7 +174,8 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 			return emptyGroupsResponse(c)
 		}
 
-		logger.InfoContext(ctx, "processing webhook",
+		// Email only at debug level — the hot path logs user IDs, not PII.
+		logger.DebugContext(ctx, "processing webhook",
 			slog.String("function", payload.Function),
 			slog.String("org_id", orgID),
 			slog.String("email", email),
@@ -159,7 +187,7 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 		if err != nil {
 			logger.WarnContext(ctx, "groups resolver failed, returning empty groups",
 				slog.String("org_id", orgID),
-				slog.String("email", email),
+				slog.String("user_id", userID),
 				slog.Any("error", err),
 			)
 
@@ -172,19 +200,22 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 			grantsCount = len(mapper.NewMapper(org.Rules).MapGroups(groups))
 		}
 
-		// Sync grants (idempotent — no-op if already correct).
-		if deps.Syncer != nil && userID != "" && len(groups) > 0 {
+		// Sync grants (idempotent — no-op if already correct). Zero-rules orgs
+		// claim no grant authority: their desired state is always empty, so
+		// syncing would wipe every existing grant on each login — mirror
+		// batch sync, which skips zero-rules orgs entirely.
+		if deps.Syncer != nil && userID != "" && len(groups) > 0 && len(org.Rules) > 0 {
 			userLocks.Lock(userID)
 			syncGrants(ctx, deps, orgID, org.Rules, userID, groups)
 			userLocks.Unlock(userID)
 		}
 
 		// One structured line per enrichment request: WARN on zero groups so
-		// "empty claims" responses are diagnosable from logs.
+		// "empty claims" responses are diagnosable from logs. Identified by
+		// user_id; the email appears only in the debug-level line above.
 		if len(groups) == 0 {
 			logger.WarnContext(ctx, "user resolved to 0 groups — identity may lack directory group membership",
 				slog.String("org_id", orgID),
-				slog.String("email", email),
 				slog.String("user_id", userID),
 				slog.Int("groups_count", 0),
 				slog.Int("grants_count", 0),
@@ -193,13 +224,14 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 		} else {
 			logger.InfoContext(ctx, "returning groups claim",
 				slog.String("org_id", orgID),
-				slog.String("email", email),
 				slog.String("user_id", userID),
 				slog.Int("groups_count", len(groups)),
 				slog.Int("grants_count", grantsCount),
 			)
 			deps.observeWebhook(orgID, metrics.OutcomeEnriched)
 		}
+
+		observeClaimSize(deps, orgID, groups)
 
 		return c.Status(fiber.StatusOK).JSON(setClaimsResponse{
 			AppendClaims: []*appendClaim{
@@ -224,6 +256,23 @@ func orgLabel(orgID string) string {
 	}
 
 	return orgID
+}
+
+// observeClaimSize records the groups-claim entry count and approximate
+// serialized size for the response (token-bloat observability).
+func observeClaimSize(deps *Deps, orgID string, groups []string) {
+	if deps.Metrics == nil {
+		return
+	}
+
+	deps.Metrics.GroupsClaimEntries.WithLabelValues(orgID).Observe(float64(len(groups)))
+
+	size := 2 // brackets
+	for _, g := range groups {
+		size += len(g) + 3 // quotes + comma
+	}
+
+	deps.Metrics.GroupsClaimBytes.WithLabelValues(orgID).Observe(float64(size))
 }
 
 func emptyGroupsResponse(c fiber.Ctx) error {

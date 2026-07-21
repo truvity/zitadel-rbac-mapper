@@ -204,7 +204,7 @@ func TestExpandRoles_PatternsAgainstCatalog(t *testing.T) {
 	}
 	available := []string{"dmsplus:deployer", "dmsplus:viewer", "csbi-tp:viewer", "cluster:admin"}
 
-	roles := ExpandRoles(grant, available)
+	roles := ExpandRoles(grant, available, nil)
 
 	want := []string{"cluster:admin", "dmsplus:deployer", "dmsplus:viewer"}
 	if len(roles) != len(want) {
@@ -222,7 +222,7 @@ func TestExpandRoles_ExplicitRolesKeptEvenIfAbsent(t *testing.T) {
 	// Exact role keys pass through verbatim — the catalog may be stale.
 	grant := DesiredGrant{Project: "p", Roles: []string{"not-in-catalog:yet"}}
 
-	roles := ExpandRoles(grant, []string{"other:role"})
+	roles := ExpandRoles(grant, []string{"other:role"}, nil)
 
 	if len(roles) != 1 || roles[0] != "not-in-catalog:yet" {
 		t.Errorf("got roles %v, want [not-in-catalog:yet]", roles)
@@ -232,17 +232,40 @@ func TestExpandRoles_ExplicitRolesKeptEvenIfAbsent(t *testing.T) {
 func TestExpandRoles_PatternNoMatch(t *testing.T) {
 	grant := DesiredGrant{Project: "p", RolePatterns: []string{"nomatch:*"}}
 
-	roles := ExpandRoles(grant, []string{"dmsplus:viewer"})
+	roles := ExpandRoles(grant, []string{"dmsplus:viewer"}, nil)
 
 	if len(roles) != 0 {
 		t.Errorf("got roles %v, want none", roles)
 	}
 }
 
+func TestExpandRoles_ProtectedRolesNeverGrantedViaPatterns(t *testing.T) {
+	// path.Match treats only `/` as a separator, so `*` matches every role
+	// key including `cluster:admin` — protectedRoles is the guardrail.
+	grant := DesiredGrant{Project: "p", RolePatterns: []string{"*"}}
+
+	roles := ExpandRoles(grant, []string{"cluster:admin", "dmsplus:viewer"}, []string{"cluster:admin"})
+
+	if len(roles) != 1 || roles[0] != "dmsplus:viewer" {
+		t.Errorf("got roles %v, want [dmsplus:viewer] — cluster:admin must not expand via patterns", roles)
+	}
+}
+
+func TestExpandRoles_ProtectedRolesStillGrantedExplicitly(t *testing.T) {
+	grant := DesiredGrant{Project: "p", Roles: []string{"cluster:admin"}, RolePatterns: []string{"*"}}
+
+	roles := ExpandRoles(grant, []string{"cluster:admin", "dmsplus:viewer"}, []string{"cluster:admin"})
+
+	want := []string{"cluster:admin", "dmsplus:viewer"}
+	if len(roles) != 2 || roles[0] != want[0] || roles[1] != want[1] {
+		t.Errorf("got roles %v, want %v — explicit roles bypass the pattern guardrail", roles, want)
+	}
+}
+
 func TestExpandRoles_PrefixSuffixPattern(t *testing.T) {
 	grant := DesiredGrant{Project: "p", RolePatterns: []string{"*-dmsplus:*"}}
 
-	roles := ExpandRoles(grant, []string{"tp-dmsplus:viewer", "dg-dmsplus:deployer", "dmsplus:viewer"})
+	roles := ExpandRoles(grant, []string{"tp-dmsplus:viewer", "dg-dmsplus:deployer", "dmsplus:viewer"}, nil)
 
 	want := []string{"dg-dmsplus:deployer", "tp-dmsplus:viewer"}
 	if len(roles) != 2 || roles[0] != want[0] || roles[1] != want[1] {
