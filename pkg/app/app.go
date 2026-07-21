@@ -7,9 +7,11 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/truvity/zitadel-rbac-mapper/pkg/catalog"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/config"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/grantsync"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/mapper"
+	"github.com/truvity/zitadel-rbac-mapper/pkg/metrics"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/resolver"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/server"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/zitadeljwt"
@@ -17,19 +19,19 @@ import (
 
 // Options configures platform-specific dependencies injected by the thin main.
 type Options struct {
-	// RulesSource provides RBAC rules. If nil, OrgMetadataSource is used (legacy).
-	RulesSource mapper.RulesSource
+	// Source provides the v2 config. If nil, it is derived from CONFIG_FILE
+	// (FileSource) or CONFIG_SSM_PARAM (SSMSource).
+	Source mapper.Source
 }
 
 // Run initializes all components and starts the HTTP server.
 // It blocks until the context is canceled (signal received).
-// Uses OrgMetadataSource as the default rules source (K8s mode with Zitadel access).
 func Run(ctx context.Context) error {
 	return RunWithOptions(ctx, Options{})
 }
 
 // RunWithOptions initializes all components with the given options.
-// Platform-specific mains inject their RulesSource here.
+// Platform-specific mains inject their Source here.
 func RunWithOptions(ctx context.Context, opts Options) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -38,59 +40,66 @@ func RunWithOptions(ctx context.Context, opts Options) error {
 
 	logger := newLogger(cfg.LogFormat)
 
-	// Create grantsync Syncer (Zitadel Go SDK gRPC) — always needed for grant sync.
+	deps, err := BuildDeps(ctx, logger, cfg, opts)
+	if err != nil {
+		return err
+	}
+
+	logger.InfoContext(ctx, "starting zitadel-rbac-mapper",
+		slog.Int("port", cfg.Port),
+		slog.Int("health_port", cfg.HealthPort),
+		slog.Int("orgs", len(deps.Source.Orgs())),
+		slog.String("zitadel_domain", cfg.ZitadelDomain),
+		slog.String("role_cache_ttl", deps.Source.RoleCacheTTL().String()),
+	)
+
+	return server.Run(ctx, server.Config{
+		Port:       cfg.Port,
+		HealthPort: cfg.HealthPort,
+		SyncAPIKey: cfg.SyncAPIKey,
+	}, deps)
+}
+
+// BuildDeps constructs all server dependencies from environment config.
+// Shared by the server mode and the `sync` subcommand.
+func BuildDeps(ctx context.Context, logger *slog.Logger, cfg *config.Config, opts Options) (*server.Deps, error) {
+	// Create grantsync Syncer (Zitadel Go SDK gRPC) — grant sync + role catalog.
 	syncer, err := grantsync.New(ctx, logger, grantsync.Config{
 		Domain:  cfg.ZitadelDomain,
 		Port:    cfg.ZitadelPort,
 		KeyJSON: cfg.ZitadelKeyJSON,
 	})
 	if err != nil {
-		return fmt.Errorf("create grantsync client: %w", err)
+		return nil, fmt.Errorf("create grantsync client: %w", err)
 	}
 
-	// Resolve rules source.
-	var rulesSource mapper.RulesSource
+	// Resolve config source.
+	var source mapper.Source
 
 	switch {
-	case opts.RulesSource != nil:
-		rulesSource = opts.RulesSource
-	case cfg.RulesFile != "":
+	case opts.Source != nil:
+		source = opts.Source
+	case cfg.ConfigFile != "":
 		// FileSource: read from mounted file (K8s ConfigMap).
-		rulesSource = mapper.NewFileSource(ctx, logger, cfg.RulesFile)
+		source = mapper.NewFileSource(ctx, logger, cfg.ConfigFile)
+	case cfg.ConfigSSMParam != "":
+		// SSMSource: read from SSM Parameter Store (Lambda extension).
+		source = mapper.NewSSMSource(ctx, logger, cfg.ConfigSSMParam)
 	default:
-		// OrgMetadataSource (legacy): read from Zitadel Org Metadata.
-		metadataLoader, loadErr := mapper.NewMetadataLoader(ctx, logger, syncer.Client(), cfg.RulesCacheTTL)
-		if loadErr != nil {
-			return fmt.Errorf("create metadata loader: %w", loadErr)
-		}
-
-		rulesSource = metadataLoader
+		return nil, fmt.Errorf("no config source: set CONFIG_FILE or CONFIG_SSM_PARAM")
 	}
 
-	// Create groups resolver (HTTP client to google-group-sync).
-	groupsResolver := resolver.NewHTTPResolver(logger, cfg.GroupsResolverURL)
+	m := metrics.New()
 
-	// Create JWT verifier for webhook payload verification.
-	jwtVerifier := zitadeljwt.New(cfg.ZitadelDomain)
-
-	rulesCount := 0
-	for _, org := range rulesSource.Orgs() {
-		rulesCount += len(rulesSource.Rules(ctx, org.ID))
-	}
-
-	logger.InfoContext(ctx, "starting zitadel-rbac-mapper",
-		slog.Int("port", cfg.Port),
-		slog.Int("health_port", cfg.HealthPort),
-		slog.Int("rules", rulesCount),
-		slog.String("zitadel_domain", cfg.ZitadelDomain),
-		slog.String("rules_cache_ttl", cfg.RulesCacheTTL.String()),
-	)
-
-	return server.Run(ctx, logger, server.Config{
-		Port:       cfg.Port,
-		HealthPort: cfg.HealthPort,
-		SyncAPIKey: cfg.SyncAPIKey,
-	}, groupsResolver, rulesSource, syncer, jwtVerifier)
+	return &server.Deps{
+		Logger:    logger,
+		Source:    source,
+		Resolvers: resolver.NewRegistry(logger, m),
+		Catalog:   catalog.New(logger, syncer.Client().ManagementService(), source.RoleCacheTTL, m),
+		Syncer:    syncer,
+		Verifier:  zitadeljwt.New(cfg.ZitadelDomain),
+		Metrics:   m,
+	}, nil
 }
 
 func newLogger(format string) *slog.Logger {

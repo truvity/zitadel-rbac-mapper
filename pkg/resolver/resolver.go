@@ -1,4 +1,7 @@
-// Package resolver provides an HTTP client for the groups resolver service (google-group-sync).
+// Package resolver provides per-org HTTP clients for the directory-groups
+// resolver services (google-group-sync / entra-group-sync — same HTTP contract),
+// with per-org isolation: independent timeouts, bounded concurrency (bulkhead)
+// and a circuit breaker.
 package resolver
 
 import (
@@ -26,13 +29,14 @@ type HTTPResolver struct {
 	logger  *slog.Logger
 }
 
-// NewHTTPResolver creates a new HTTP-based groups resolver.
-// baseURL is the base URL of the google-group-sync service (e.g., http://localhost:9090).
-func NewHTTPResolver(logger *slog.Logger, baseURL string) *HTTPResolver {
+// NewHTTPResolver creates a new HTTP-based groups resolver with the given
+// per-request timeout. Each HTTPResolver owns its http.Client, so connection
+// pools are independent between resolvers.
+func NewHTTPResolver(logger *slog.Logger, baseURL string, timeout time.Duration) *HTTPResolver {
 	return &HTTPResolver{
 		baseURL: baseURL,
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: timeout,
 		},
 		logger: logger,
 	}

@@ -14,10 +14,10 @@ import (
 )
 
 // Compile-time interface check.
-var _ RulesSource = (*SSMSource)(nil)
+var _ Source = (*SSMSource)(nil)
 
-// SSMSource reads RBAC rules from AWS SSM Parameter Store via the Parameters and Secrets
-// Lambda extension's localhost HTTP endpoint. No aws-sdk import needed.
+// SSMSource reads the v2 config from AWS SSM Parameter Store via the Parameters
+// and Secrets Lambda extension's localhost HTTP endpoint. No aws-sdk import needed.
 //
 // The extension is available at http://localhost:2773 and uses the AWS_SESSION_TOKEN
 // for authentication via the X-Aws-Parameters-Secrets-Token header.
@@ -30,14 +30,13 @@ type SSMSource struct {
 	client    *http.Client
 
 	mu       sync.RWMutex
-	orgRules map[string][]Rule
-	orgs     []OrgInfo
+	cfg      *Config
 	lastHash string
 }
 
-// NewSSMSource creates an SSMSource that reads rules from the given SSM parameter name.
+// NewSSMSource creates an SSMSource that reads config from the given SSM parameter name.
 // It performs an initial load — if the parameter doesn't exist or is invalid, it starts
-// with empty rules (logged as a warning) rather than failing.
+// with empty config (logged as a warning) rather than failing.
 func NewSSMSource(ctx context.Context, logger *slog.Logger, paramName string) *SSMSource {
 	s := &SSMSource{
 		paramName: paramName,
@@ -45,11 +44,11 @@ func NewSSMSource(ctx context.Context, logger *slog.Logger, paramName string) *S
 		client: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		orgRules: make(map[string][]Rule),
+		cfg: &Config{RoleCacheTTL: Duration(DefaultRoleCacheTTL)},
 	}
 
 	if err := s.ForceRefresh(ctx); err != nil {
-		logger.WarnContext(ctx, "initial SSM rules load failed, starting with empty rules",
+		logger.WarnContext(ctx, "initial SSM config load failed, starting with empty config",
 			slog.String("param", paramName),
 			slog.Any("error", err),
 		)
@@ -58,20 +57,30 @@ func NewSSMSource(ctx context.Context, logger *slog.Logger, paramName string) *S
 	return s
 }
 
-// Rules returns the current RBAC rules for the given organization.
-func (s *SSMSource) Rules(_ context.Context, orgID string) []Rule {
+// Org returns the configuration for the given organization.
+func (s *SSMSource) Org(_ context.Context, orgID string) (OrgConfig, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.orgRules[orgID]
+	org, ok := s.cfg.Orgs[orgID]
+
+	return org, ok
 }
 
-// Orgs returns all organizations that have rules configured.
+// Orgs returns all configured organizations.
 func (s *SSMSource) Orgs() []OrgInfo {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.orgs
+	return orgInfos(s.cfg)
+}
+
+// RoleCacheTTL returns the configured role-catalog TTL.
+func (s *SSMSource) RoleCacheTTL() time.Duration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.cfg.RoleCacheTTL.Std()
 }
 
 // ForceRefresh fetches the parameter from the Lambda extension and re-parses if changed.
@@ -96,47 +105,22 @@ func (s *SSMSource) ForceRefresh(ctx context.Context) error {
 		return nil
 	}
 
-	// Parse the rules file content (same schema as FileSource).
-	var rulesFile RulesFile
-	if err := json.Unmarshal(data, &rulesFile); err != nil {
-		return fmt.Errorf("parse SSM parameter %q: %w", s.paramName, err)
-	}
-
-	if err := validateRulesFile(&rulesFile); err != nil {
-		return fmt.Errorf("validate SSM parameter %q: %w", s.paramName, err)
-	}
-
-	// Build internal maps.
-	orgRules := make(map[string][]Rule, len(rulesFile.Orgs))
-	orgs := make([]OrgInfo, 0, len(rulesFile.Orgs))
-
-	for _, org := range rulesFile.Orgs {
-		if len(org.Rules) > 0 {
-			orgRules[org.ID] = org.Rules
-		}
-
-		orgs = append(orgs, OrgInfo{
-			ID:   org.ID,
-			Name: org.Name,
-		})
+	// Same schema as FileSource (YAML; JSON works too — YAML superset).
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return fmt.Errorf("SSM parameter %q: %w", s.paramName, err)
 	}
 
 	// Swap atomically.
 	s.mu.Lock()
-	s.orgRules = orgRules
-	s.orgs = orgs
+	s.cfg = cfg
 	s.lastHash = hash
 	s.mu.Unlock()
 
-	totalRules := 0
-	for _, rules := range orgRules {
-		totalRules += len(rules)
-	}
-
-	s.logger.InfoContext(ctx, "loaded rules from SSM",
+	s.logger.InfoContext(ctx, "loaded config from SSM",
 		slog.String("param", s.paramName),
-		slog.Int("orgs", len(orgs)),
-		slog.Int("total_rules", totalRules),
+		slog.Int("orgs", len(cfg.Orgs)),
+		slog.Int("total_rules", totalRules(cfg)),
 	)
 
 	return nil

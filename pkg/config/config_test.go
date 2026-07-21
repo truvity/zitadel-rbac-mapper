@@ -4,15 +4,19 @@ import (
 	"testing"
 )
 
-func TestLoad_MissingRequired(t *testing.T) {
-	// Clear all relevant env vars.
+func clearEnv(t *testing.T) {
+	t.Helper()
+
 	for _, key := range []string{
-		"GROUPS_RESOLVER_URL", "ZITADEL_DOMAIN", "ZITADEL_KEY_JSON",
-		"ZITADEL_PORT", "SYNC_API_KEY", "RULES_CACHE_TTL", "RULES_FILE",
-		"PORT", "HEALTH_PORT", "LOG_FORMAT",
+		"ZITADEL_DOMAIN", "ZITADEL_KEY_JSON", "ZITADEL_PORT", "SYNC_API_KEY",
+		"CONFIG_FILE", "CONFIG_SSM_PARAM", "PORT", "HEALTH_PORT", "LOG_FORMAT",
 	} {
 		t.Setenv(key, "")
 	}
+}
+
+func TestLoad_MissingRequired(t *testing.T) {
+	clearEnv(t)
 
 	_, err := Load()
 	if err == nil {
@@ -21,23 +25,15 @@ func TestLoad_MissingRequired(t *testing.T) {
 }
 
 func TestLoad_ValidMinimal(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
 	t.Setenv("ZITADEL_KEY_JSON", `{"type":"serviceaccount","keyId":"1","key":"k","userId":"u"}`)
 	t.Setenv("SYNC_API_KEY", "test-key-123")
-	t.Setenv("GROUPS_RESOLVER_URL", "")
-	t.Setenv("ZITADEL_PORT", "")
-	t.Setenv("RULES_CACHE_TTL", "")
-	t.Setenv("PORT", "")
-	t.Setenv("HEALTH_PORT", "")
-	t.Setenv("LOG_FORMAT", "")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
 
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if cfg.GroupsResolverURL != "http://localhost:9090" {
-		t.Errorf("got GroupsResolverURL=%q, want http://localhost:9090", cfg.GroupsResolverURL)
 	}
 
 	if cfg.ZitadelPort != "443" {
@@ -52,22 +48,20 @@ func TestLoad_ValidMinimal(t *testing.T) {
 		t.Errorf("got HealthPort=%d, want 7070", cfg.HealthPort)
 	}
 
-	if cfg.RulesCacheTTL.String() != "5m0s" {
-		t.Errorf("got RulesCacheTTL=%s, want 5m0s", cfg.RulesCacheTTL)
-	}
-
 	if cfg.SyncAPIKey != "test-key-123" {
 		t.Errorf("got SyncAPIKey=%q, want test-key-123", cfg.SyncAPIKey)
+	}
+
+	if cfg.ConfigFile != "/etc/config/config.yaml" {
+		t.Errorf("got ConfigFile=%q", cfg.ConfigFile)
 	}
 }
 
 func TestLoad_MissingSyncAPIKey(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
 	t.Setenv("ZITADEL_KEY_JSON", `{"type":"serviceaccount","keyId":"1","key":"k","userId":"u"}`)
-	t.Setenv("SYNC_API_KEY", "")
-	t.Setenv("PORT", "")
-	t.Setenv("HEALTH_PORT", "")
-	t.Setenv("RULES_CACHE_TTL", "")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
 
 	_, err := Load()
 	if err == nil {
@@ -75,27 +69,43 @@ func TestLoad_MissingSyncAPIKey(t *testing.T) {
 	}
 }
 
-func TestLoad_InvalidCacheTTL(t *testing.T) {
+func TestLoad_MissingConfigSource(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
 	t.Setenv("ZITADEL_KEY_JSON", `{"type":"serviceaccount","keyId":"1","key":"k","userId":"u"}`)
 	t.Setenv("SYNC_API_KEY", "test-key-123")
-	t.Setenv("RULES_CACHE_TTL", "not-a-duration")
-	t.Setenv("PORT", "")
-	t.Setenv("HEALTH_PORT", "")
 
 	_, err := Load()
 	if err == nil {
-		t.Fatal("expected error for invalid RULES_CACHE_TTL")
+		t.Fatal("expected error when neither CONFIG_FILE nor CONFIG_SSM_PARAM is set")
+	}
+}
+
+func TestLoad_SSMParamAccepted(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
+	t.Setenv("ZITADEL_KEY_JSON", `{"type":"serviceaccount","keyId":"1","key":"k","userId":"u"}`)
+	t.Setenv("SYNC_API_KEY", "test-key-123")
+	t.Setenv("CONFIG_SSM_PARAM", "/rbac-mapper/config")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if cfg.ConfigSSMParam != "/rbac-mapper/config" {
+		t.Errorf("got ConfigSSMParam=%q", cfg.ConfigSSMParam)
 	}
 }
 
 func TestLoad_CustomPort(t *testing.T) {
+	clearEnv(t)
 	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
 	t.Setenv("ZITADEL_KEY_JSON", `{"type":"serviceaccount","keyId":"1","key":"k","userId":"u"}`)
 	t.Setenv("SYNC_API_KEY", "test-key-123")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
 	t.Setenv("PORT", "9090")
 	t.Setenv("HEALTH_PORT", "9091")
-	t.Setenv("RULES_CACHE_TTL", "10m")
 
 	cfg, err := Load()
 	if err != nil {
@@ -109,8 +119,18 @@ func TestLoad_CustomPort(t *testing.T) {
 	if cfg.HealthPort != 9091 {
 		t.Errorf("got HealthPort=%d, want 9091", cfg.HealthPort)
 	}
+}
 
-	if cfg.RulesCacheTTL.String() != "10m0s" {
-		t.Errorf("got RulesCacheTTL=%s, want 10m0s", cfg.RulesCacheTTL)
+func TestLoad_InvalidPort(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ZITADEL_DOMAIN", "auth.example.com")
+	t.Setenv("ZITADEL_KEY_JSON", `{"type":"serviceaccount","keyId":"1","key":"k","userId":"u"}`)
+	t.Setenv("SYNC_API_KEY", "test-key-123")
+	t.Setenv("CONFIG_FILE", "/etc/config/config.yaml")
+	t.Setenv("PORT", "not-a-port")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid PORT")
 	}
 }

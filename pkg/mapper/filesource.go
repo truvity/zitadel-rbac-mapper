@@ -8,51 +8,36 @@ import (
 	"log/slog"
 	"os"
 	"sync"
-
-	"gopkg.in/yaml.v3"
+	"time"
 )
 
 // Compile-time interface check.
-var _ RulesSource = (*FileSource)(nil)
+var _ Source = (*FileSource)(nil)
 
-// RulesFile is the schema for the rules YAML file.
-// It preserves the existing structure: per-org rules with project/role grants.
-type RulesFile struct {
-	Orgs []RulesFileOrg `yaml:"orgs" json:"orgs"`
-}
-
-// RulesFileOrg represents a single org's rules in the file.
-type RulesFileOrg struct {
-	ID    string `yaml:"id" json:"id"`
-	Name  string `yaml:"name" json:"name"`
-	Rules []Rule `yaml:"rules" json:"rules"`
-}
-
-// FileSource reads RBAC rules from a mounted file (e.g., ConfigMap volume).
+// FileSource reads the v2 config from a mounted file (e.g., ConfigMap volume).
 // It uses content-hash comparison to skip re-parsing when the file hasn't changed.
-// On a bad/invalid file, it keeps the previous rules, logs an error, and never crashes.
+// On a bad/invalid file, it keeps the previous config, logs an error, and never crashes.
 type FileSource struct {
 	path   string
 	logger *slog.Logger
 
 	mu       sync.RWMutex
-	orgRules map[string][]Rule
-	orgs     []OrgInfo
+	cfg      *Config
 	lastHash string
 }
 
-// NewFileSource creates a FileSource that reads rules from the given path.
+// NewFileSource creates a FileSource that reads config from the given path.
 // It performs an initial load — if the file doesn't exist or is invalid, it starts
-// with empty rules (logged as a warning) rather than failing.
+// with empty config (logged as a warning) rather than failing.
 func NewFileSource(ctx context.Context, logger *slog.Logger, path string) *FileSource {
 	fs := &FileSource{
-		path:     path,
-		logger:   logger,
-		orgRules: make(map[string][]Rule),
+		path:   path,
+		logger: logger,
+		cfg:    &Config{RoleCacheTTL: Duration(DefaultRoleCacheTTL)},
 	}
 
 	if err := fs.ForceRefresh(ctx); err != nil {
-		logger.WarnContext(ctx, "initial rules load failed, starting with empty rules",
+		logger.WarnContext(ctx, "initial config load failed, starting with empty config",
 			slog.String("path", path),
 			slog.Any("error", err),
 		)
@@ -61,28 +46,38 @@ func NewFileSource(ctx context.Context, logger *slog.Logger, path string) *FileS
 	return fs
 }
 
-// Rules returns the current RBAC rules for the given organization.
-func (fs *FileSource) Rules(_ context.Context, orgID string) []Rule {
+// Org returns the configuration for the given organization.
+func (fs *FileSource) Org(_ context.Context, orgID string) (OrgConfig, bool) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	return fs.orgRules[orgID]
+	org, ok := fs.cfg.Orgs[orgID]
+
+	return org, ok
 }
 
-// Orgs returns all organizations that have rules configured.
+// Orgs returns all configured organizations.
 func (fs *FileSource) Orgs() []OrgInfo {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
 
-	return fs.orgs
+	return orgInfos(fs.cfg)
 }
 
-// ForceRefresh re-reads the file and re-parses rules if the content hash changed.
-// On failure, keeps previous rules and returns the error.
+// RoleCacheTTL returns the configured role-catalog TTL.
+func (fs *FileSource) RoleCacheTTL() time.Duration {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	return fs.cfg.RoleCacheTTL.Std()
+}
+
+// ForceRefresh re-reads the file and re-parses config if the content hash changed.
+// On failure, keeps previous config and returns the error.
 func (fs *FileSource) ForceRefresh(ctx context.Context) error {
 	data, err := os.ReadFile(fs.path)
 	if err != nil {
-		return fmt.Errorf("read rules file %q: %w", fs.path, err)
+		return fmt.Errorf("read config file %q: %w", fs.path, err)
 	}
 
 	// Content-hash comparison — skip re-parse if unchanged.
@@ -93,84 +88,49 @@ func (fs *FileSource) ForceRefresh(ctx context.Context) error {
 	fs.mu.RUnlock()
 
 	if unchanged {
-		fs.logger.DebugContext(ctx, "rules file unchanged, skipping re-parse",
+		fs.logger.DebugContext(ctx, "config file unchanged, skipping re-parse",
 			slog.String("path", fs.path),
 		)
 
 		return nil
 	}
 
-	// Parse the file.
-	var rulesFile RulesFile
-	if err := yaml.Unmarshal(data, &rulesFile); err != nil {
-		return fmt.Errorf("parse rules file %q: %w", fs.path, err)
-	}
-
-	// Validate.
-	if err := validateRulesFile(&rulesFile); err != nil {
-		return fmt.Errorf("validate rules file %q: %w", fs.path, err)
-	}
-
-	// Build the internal maps.
-	orgRules := make(map[string][]Rule, len(rulesFile.Orgs))
-	orgs := make([]OrgInfo, 0, len(rulesFile.Orgs))
-
-	for _, org := range rulesFile.Orgs {
-		if len(org.Rules) > 0 {
-			orgRules[org.ID] = org.Rules
-		}
-
-		orgs = append(orgs, OrgInfo{
-			ID:   org.ID,
-			Name: org.Name,
-		})
+	cfg, err := ParseConfig(data)
+	if err != nil {
+		return fmt.Errorf("config file %q: %w", fs.path, err)
 	}
 
 	// Swap atomically.
 	fs.mu.Lock()
-	fs.orgRules = orgRules
-	fs.orgs = orgs
+	fs.cfg = cfg
 	fs.lastHash = hash
 	fs.mu.Unlock()
 
-	totalRules := 0
-	for _, rules := range orgRules {
-		totalRules += len(rules)
-	}
-
-	fs.logger.InfoContext(ctx, "loaded rules from file",
+	fs.logger.InfoContext(ctx, "loaded config from file",
 		slog.String("path", fs.path),
-		slog.Int("orgs", len(orgs)),
-		slog.Int("total_rules", totalRules),
+		slog.Int("orgs", len(cfg.Orgs)),
+		slog.Int("total_rules", totalRules(cfg)),
 	)
 
 	return nil
 }
 
-func validateRulesFile(rf *RulesFile) error {
-	for i, org := range rf.Orgs {
-		if org.ID == "" {
-			return fmt.Errorf("org[%d]: id is required", i)
-		}
-
-		for j, rule := range org.Rules {
-			if rule.Group == "" {
-				return fmt.Errorf("org[%d].rules[%d]: group is required", i, j)
-			}
-
-			for k, grant := range rule.Grants {
-				if grant.Project == "" {
-					return fmt.Errorf("org[%d].rules[%d].grants[%d]: project is required", i, j, k)
-				}
-
-				if len(grant.Roles) == 0 {
-					return fmt.Errorf("org[%d].rules[%d].grants[%d]: roles must not be empty", i, j, k)
-				}
-			}
-		}
+func orgInfos(cfg *Config) []OrgInfo {
+	orgs := make([]OrgInfo, 0, len(cfg.Orgs))
+	for id, org := range cfg.Orgs {
+		orgs = append(orgs, OrgInfo{ID: id, Name: org.Name})
 	}
 
-	return nil
+	return orgs
+}
+
+func totalRules(cfg *Config) int {
+	total := 0
+	for _, org := range cfg.Orgs {
+		total += len(org.Rules)
+	}
+
+	return total
 }
 
 func sha256sum(data []byte) string {
