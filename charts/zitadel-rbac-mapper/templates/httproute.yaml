@@ -18,7 +18,13 @@ spec:
     {{- if .Values.httpRoute.rules }}
     {{- toYaml .Values.httpRoute.rules | nindent 4 }}
     {{- else }}
-    - backendRefs:
+    # Only the webhook is exposed through the gateway: /sync (Bearer-authed
+    # admin surface) and /health stay cluster-internal.
+    - matches:
+        - path:
+            type: Exact
+            value: /webhook
+      backendRefs:
         - name: {{ include "zitadel-rbac-mapper.fullname" . }}
           port: {{ .Values.service.port }}
     {{- end }}
