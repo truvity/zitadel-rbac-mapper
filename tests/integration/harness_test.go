@@ -88,6 +88,10 @@ type fakeZitadel struct {
 	listRolesCalls   atomic.Int64
 	listGrantedCalls atomic.Int64
 
+	// Failure injection for the role-catalog API surface.
+	failListRoles   atomic.Bool
+	failListGranted atomic.Bool
+
 	grpcAddr string
 	grpcSrv  *grpc.Server
 
@@ -198,6 +202,27 @@ func (fz *fakeZitadel) setGrantedProject(orgID, projectID, grantID string, roles
 	}
 
 	fz.granted[orgID][projectID] = &grantedProject{grantID: grantID, roles: roles}
+}
+
+// seedGrant inserts a pre-existing UserGrant directly into the store,
+// simulating a grant created outside the mapper (manual assignment, another
+// tool, or a previous config generation).
+func (fz *fakeZitadel) seedGrant(orgID, userID, projectID string, roles ...string) string {
+	fz.mu.Lock()
+	defer fz.mu.Unlock()
+
+	fz.nextID++
+	id := fmt.Sprintf("grant-%d", fz.nextID)
+
+	fz.grants[id] = &zuser.UserGrant{
+		Id:        id,
+		UserId:    userID,
+		ProjectId: projectID,
+		RoleKeys:  roles,
+		OrgId:     orgID,
+	}
+
+	return id
 }
 
 func (fz *fakeZitadel) addUser(orgID, userID, email string) {
@@ -353,6 +378,10 @@ func (fz *fakeZitadel) RemoveUserGrant(_ context.Context, req *management.Remove
 func (fz *fakeZitadel) ListProjectRoles(ctx context.Context, req *management.ListProjectRolesRequest) (*management.ListProjectRolesResponse, error) {
 	fz.listRolesCalls.Add(1)
 
+	if fz.failListRoles.Load() {
+		return nil, status.Error(codes.Unavailable, "injected ListProjectRoles failure")
+	}
+
 	fz.mu.Lock()
 	defer fz.mu.Unlock()
 
@@ -373,6 +402,10 @@ func (fz *fakeZitadel) ListProjectRoles(ctx context.Context, req *management.Lis
 
 func (fz *fakeZitadel) ListGrantedProjects(ctx context.Context, _ *management.ListGrantedProjectsRequest) (*management.ListGrantedProjectsResponse, error) {
 	fz.listGrantedCalls.Add(1)
+
+	if fz.failListGranted.Load() {
+		return nil, status.Error(codes.Unavailable, "injected ListGrantedProjects failure")
+	}
 
 	fz.mu.Lock()
 	defer fz.mu.Unlock()
@@ -434,13 +467,15 @@ func rolesSubset(requested, available []string) error {
 // ---------------------------------------------------------------------------
 
 type fakeResolver struct {
-	mu     sync.Mutex
-	groups map[string][]string
-	delay  time.Duration
-	fail   bool
+	mu        sync.Mutex
+	groups    map[string][]string
+	delay     time.Duration
+	fail      bool
+	malformed bool
 
-	calls atomic.Int64
-	srv   *httptest.Server
+	calls    atomic.Int64
+	inflight atomic.Int64
+	srv      *httptest.Server
 }
 
 func newFakeResolver(t *testing.T, groups map[string][]string) *fakeResolver {
@@ -453,10 +488,13 @@ func newFakeResolver(t *testing.T, groups map[string][]string) *fakeResolver {
 
 	fr.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fr.calls.Add(1)
+		fr.inflight.Add(1)
+		defer fr.inflight.Add(-1)
 
 		fr.mu.Lock()
 		delay := fr.delay
 		fail := fr.fail
+		malformed := fr.malformed
 		fr.mu.Unlock()
 
 		if delay > 0 {
@@ -465,6 +503,16 @@ func newFakeResolver(t *testing.T, groups map[string][]string) *fakeResolver {
 
 		if fail {
 			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		if malformed {
+			// HTTP 200 with a truncated JSON body: the mapper must treat
+			// this exactly like a resolver failure (error, not a panic and
+			// not an empty-groups success).
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"groups": ["eng@corp`))
+
 			return
 		}
 
@@ -504,6 +552,38 @@ func (fr *fakeResolver) setFail(fail bool) {
 	defer fr.mu.Unlock()
 
 	fr.fail = fail
+}
+
+func (fr *fakeResolver) setMalformed(malformed bool) {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+
+	fr.malformed = malformed
+}
+
+func (fr *fakeResolver) setGroups(email string, groups ...string) {
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+
+	fr.groups[email] = groups
+}
+
+// waitInflight blocks until at least n resolver requests are concurrently
+// in-flight. This is the synchronization point for bulkhead tests: it removes
+// any dependency on goroutine scheduling latency (slow CI safe).
+func (fr *fakeResolver) waitInflight(t *testing.T, n int64, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if fr.inflight.Load() >= n {
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatalf("timed out waiting for %d in-flight resolver requests (have %d)", n, fr.inflight.Load())
 }
 
 func (fr *fakeResolver) url() string { return fr.srv.URL }
@@ -667,6 +747,15 @@ func (s *stack) login(userID, email, orgID string) []string {
 func groupsClaim(t *testing.T, body []byte) []string {
 	t.Helper()
 
+	groups, err := parseGroupsClaim(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return groups
+}
+
+func parseGroupsClaim(body []byte) ([]string, error) {
 	var resp struct {
 		AppendClaims []struct {
 			Key   string   `json:"key"`
@@ -675,18 +764,74 @@ func groupsClaim(t *testing.T, body []byte) []string {
 	}
 
 	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("decode response %q: %v", string(body), err)
+		return nil, fmt.Errorf("decode response %q: %w", string(body), err)
 	}
 
 	for _, claim := range resp.AppendClaims {
 		if claim.Key == "groups" {
-			return claim.Value
+			return claim.Value, nil
 		}
 	}
 
-	t.Fatalf("no groups claim in response: %s", string(body))
+	return nil, fmt.Errorf("no groups claim in response: %s", string(body))
+}
 
-	return nil
+// tryLogin is the goroutine-safe variant of login: it never calls t.Fatal, so
+// it may be used from concurrently spawned goroutines (t.Fatal outside the
+// test goroutine is illegal and hides failures). It returns the HTTP status,
+// the groups claim (when status is 200) and any transport/decode error.
+func (s *stack) tryLogin(userID, email, orgID string) (int, []string, error) {
+	signed, err := jws.Sign(webhookPayload(userID, email, orgID), jws.WithKey(jwa.RS256(), s.fz.privKey))
+	if err != nil {
+		return 0, nil, fmt.Errorf("sign payload: %w", err)
+	}
+
+	resp, err := http.Post(s.baseURL+"/webhook", "application/json", strings.NewReader(string(signed)))
+	if err != nil {
+		return 0, nil, err
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil, nil
+	}
+
+	groups, err := parseGroupsClaim(body)
+
+	return resp.StatusCode, groups, err
+}
+
+// postSync invokes POST /sync (batch reconciliation) with the correct Bearer
+// token and returns the HTTP status and body.
+func (s *stack) postSync() (int, []byte) {
+	s.t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, s.baseURL+"/sync", http.NoBody)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+syncAPIKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+
+	return resp.StatusCode, body
 }
 
 // rewriteConfig replaces the config file and forces a refresh.

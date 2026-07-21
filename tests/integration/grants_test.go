@@ -53,10 +53,18 @@ func TestPatternExpansion_AndCatalogTTL(t *testing.T) {
 		"alice@corp.com": {"eng@corp.com"},
 	})
 
-	s := newStack(t, fz, patternConfig(res.url(), "400ms"))
+	// TTL long enough that the staleness re-login below reliably lands inside
+	// the window even on slow CI, short enough to test refresh quickly.
+	const ttl = 2 * time.Second
+
+	s := newStack(t, fz, patternConfig(res.url(), ttl.String()))
 
 	// First login: dmsplus:* expands to the existing dmsplus roles;
 	// csbi-tp:viewer must NOT match; exact key fidelity is preserved.
+	// The catalog is fetched during this login — the TTL clock starts here
+	// (taken just before the request, so catalogLoadedAt is conservative).
+	catalogLoadedAt := time.Now()
+
 	s.login("user-alice", "alice@corp.com", "org-a")
 
 	roles := grantRoles(t, s, "user-alice")
@@ -72,14 +80,20 @@ func TestPatternExpansion_AndCatalogTTL(t *testing.T) {
 
 	s.login("user-alice", "alice@corp.com", "org-a")
 
-	roles = grantRoles(t, s, "user-alice")
-	if fmt.Sprint(roles) != fmt.Sprint(want) {
-		t.Fatalf("roles changed within TTL: %v, want stale %v", roles, want)
+	// Guard against a pathologically slow run: the staleness assertion is
+	// only meaningful if the re-login provably happened inside the TTL.
+	if time.Since(catalogLoadedAt) < ttl {
+		roles = grantRoles(t, s, "user-alice")
+		if fmt.Sprint(roles) != fmt.Sprint(want) {
+			t.Fatalf("roles changed within TTL: %v, want stale %v", roles, want)
+		}
+	} else {
+		t.Log("run too slow to assert within-TTL staleness — skipping that sub-assertion")
 	}
 
 	// After the TTL expires the catalog refreshes and the pattern picks up
 	// the new role on the next login.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(time.Until(catalogLoadedAt.Add(ttl + 500*time.Millisecond)))
 
 	s.login("user-alice", "alice@corp.com", "org-a")
 
