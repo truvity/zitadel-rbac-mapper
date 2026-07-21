@@ -4,6 +4,14 @@
 // is a compact JWS signed by the instance's key. This package fetches the JWKS from
 // the instance's well-known endpoint and verifies the signature, returning the
 // extracted payload (the actual Actions V2 JSON).
+//
+// The JWKS is cached and refreshed automatically:
+//   - a periodic refresh (refreshInterval, default 15m) bounds staleness;
+//   - an on-demand refetch fires when a token references an unknown key ID
+//     (signing-key rotation), rate-limited to one per minRefetchInterval
+//     (default 1m) so unverified traffic cannot hammer the JWKS endpoint.
+//
+// No process restart is required after Zitadel rotates its signing keys.
 package zitadeljwt
 
 import (
@@ -19,12 +27,42 @@ import (
 	"github.com/lestrrat-go/jwx/v4/jws"
 )
 
+const (
+	// expLeeway is the allowed clock skew when validating the exp claim.
+	expLeeway = 60 * time.Second
+
+	// defaultRefreshInterval bounds how stale the cached JWKS can get.
+	defaultRefreshInterval = 15 * time.Minute
+
+	// defaultMinRefetchInterval rate-limits unknown-kid triggered refetches.
+	defaultMinRefetchInterval = time.Minute
+)
+
+// allowedAlgs pins the accepted JWS algorithms to the RSA family Zitadel uses.
+// Everything else — most importantly `none` and the HMAC family (HS*, which
+// would enable key-confusion attacks against the published RSA keys) — is
+// rejected before any verification is attempted.
+var allowedAlgs = map[string]struct{}{
+	"RS256": {},
+	"RS384": {},
+	"RS512": {},
+}
+
 // Verifier verifies Zitadel JWT-signed webhook payloads and extracts the JSON body.
 type Verifier struct {
 	jwksURL string
-	keySet  jwk.Set
-	mu      sync.RWMutex
 	client  *http.Client
+
+	// requireExp reports whether payloads without an exp claim are rejected.
+	// nil means "require" (the safe default).
+	requireExp func() bool
+
+	refreshInterval    time.Duration
+	minRefetchInterval time.Duration
+
+	mu        sync.Mutex
+	keySet    jwk.Set
+	fetchedAt time.Time
 }
 
 // New creates a Verifier for the given Zitadel domain.
@@ -41,17 +79,53 @@ func NewWithJWKSURL(jwksURL string) *Verifier {
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		refreshInterval:    defaultRefreshInterval,
+		minRefetchInterval: defaultMinRefetchInterval,
 	}
 }
 
-// expLeeway is the allowed clock skew when validating the exp claim.
-const expLeeway = 60 * time.Second
+// SetRequireExp installs the provider deciding whether payloads without an
+// exp claim are rejected. Called per verification, so a live config source
+// can change the behavior without restart. nil (the default) means "require".
+func (v *Verifier) SetRequireExp(f func() bool) {
+	v.requireExp = f
+}
+
+// SetMinRefetchInterval overrides the rate limit on unknown-kid JWKS
+// refetches. Used by tests to exercise key rotation without waiting.
+func (v *Verifier) SetMinRefetchInterval(d time.Duration) {
+	v.minRefetchInterval = d
+}
 
 // VerifyAndExtract verifies the JWT signature and returns the payload (JSON bytes).
 // The input is the raw request body (a compact JWS string).
-// If the payload carries a standard "exp" claim, expired tokens are rejected.
+//
+// Rejected: signatures by keys outside the instance JWKS, algorithms outside
+// the pinned RS256 family (including `none` and HMAC), expired exp claims,
+// and — when requireExp is enabled (default) — payloads without an exp claim.
 func (v *Verifier) VerifyAndExtract(ctx context.Context, body []byte) ([]byte, error) {
-	keySet, err := v.getKeySet(ctx)
+	msg, err := jws.Parse(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse JWS: %w", err)
+	}
+
+	sigs := msg.Signatures()
+	if len(sigs) == 0 {
+		return nil, fmt.Errorf("JWS carries no signatures")
+	}
+
+	for _, sig := range sigs {
+		alg, ok := sig.ProtectedHeaders().Algorithm()
+		if !ok {
+			return nil, fmt.Errorf("JWS signature missing alg header")
+		}
+
+		if _, allowed := allowedAlgs[alg.String()]; !allowed {
+			return nil, fmt.Errorf("JWS algorithm %q not accepted (allowed: RS256/RS384/RS512)", alg.String())
+		}
+	}
+
+	keySet, err := v.keySetFor(ctx, sigs)
 	if err != nil {
 		return nil, err
 	}
@@ -61,23 +135,30 @@ func (v *Verifier) VerifyAndExtract(ctx context.Context, body []byte) ([]byte, e
 		return nil, fmt.Errorf("JWT verification failed: %w", err)
 	}
 
-	if err := checkExpiry(payload); err != nil {
+	if err := v.checkExpiry(payload); err != nil {
 		return nil, err
 	}
 
 	return payload, nil
 }
 
-// checkExpiry rejects payloads whose standard "exp" claim is in the past.
-// Payloads without an exp claim are accepted (the Actions V2 payload shape
-// is not guaranteed to carry standard JWT claims).
-func checkExpiry(payload []byte) error {
+// checkExpiry rejects payloads whose standard "exp" claim is in the past,
+// and — when requireExp is enabled — payloads without one.
+func (v *Verifier) checkExpiry(payload []byte) error {
 	var claims struct {
 		Exp *float64 `json:"exp"`
 	}
 
-	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil {
-		return nil //nolint:nilerr // absent/unreadable exp claim: nothing to validate
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		claims.Exp = nil // unreadable payload: treat as missing exp
+	}
+
+	if claims.Exp == nil {
+		if v.requireExpEnabled() {
+			return fmt.Errorf("payload carries no exp claim (security.requireExp is enabled)")
+		}
+
+		return nil
 	}
 
 	expiry := time.Unix(int64(*claims.Exp), 0)
@@ -88,30 +169,69 @@ func checkExpiry(payload []byte) error {
 	return nil
 }
 
-// getKeySet fetches and caches the JWKS (lazy initialization).
-func (v *Verifier) getKeySet(ctx context.Context) (jwk.Set, error) {
-	v.mu.RLock()
-	if v.keySet != nil {
-		defer v.mu.RUnlock()
-		return v.keySet, nil
+func (v *Verifier) requireExpEnabled() bool {
+	if v.requireExp == nil {
+		return true
 	}
-	v.mu.RUnlock()
 
+	return v.requireExp()
+}
+
+// keySetFor returns the cached JWKS, refreshing it when it is stale or when
+// the message references a key ID the cache doesn't hold (key rotation).
+func (v *Verifier) keySetFor(ctx context.Context, sigs []*jws.Signature) (jwk.Set, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	if v.keySet != nil {
-		return v.keySet, nil
+	// Periodic refresh (or initial fetch).
+	if v.keySet == nil || time.Since(v.fetchedAt) > v.refreshInterval {
+		if err := v.refetchLocked(ctx); err != nil {
+			if v.keySet == nil {
+				return nil, err
+			}
+			// Refresh failed but a cached set exists: serve stale
+			// (availability over freshness; verification still applies).
+		}
 	}
 
+	// Unknown kid → the instance may have rotated keys. Refetch, rate-limited.
+	if !v.holdsAllKidsLocked(sigs) && time.Since(v.fetchedAt) >= v.minRefetchInterval {
+		// Best-effort: on failure keep the cached set; verification fails
+		// cleanly and the next request may retry.
+		_ = v.refetchLocked(ctx)
+	}
+
+	return v.keySet, nil
+}
+
+// holdsAllKidsLocked reports whether every signature's kid is present in the
+// cached key set. Signatures without a kid count as unknown.
+func (v *Verifier) holdsAllKidsLocked(sigs []*jws.Signature) bool {
+	for _, sig := range sigs {
+		kid, ok := sig.ProtectedHeaders().KeyID()
+		if !ok || kid == "" {
+			return false
+		}
+
+		if _, found := v.keySet.LookupKeyID(kid); !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+// refetchLocked fetches the JWKS and replaces the cached set. Caller holds v.mu.
+func (v *Verifier) refetchLocked(ctx context.Context) error {
 	keySet, err := v.fetchJWKS(ctx)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	v.keySet = keySet
+	v.fetchedAt = time.Now()
 
-	return keySet, nil
+	return nil
 }
 
 // fetchJWKS fetches the JWKS from the Zitadel instance.

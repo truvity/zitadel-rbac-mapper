@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 
@@ -23,6 +25,19 @@ import (
 type Syncer struct {
 	api    *client.Client
 	logger *slog.Logger
+
+	// user → org lookup cache (see UserOrg).
+	orgCacheMu sync.Mutex
+	orgCache   map[string]userOrgEntry
+}
+
+// userOrgCacheTTL bounds the staleness of the user→org lookup cache used
+// when a webhook payload (e.g. preaccesstoken) carries no org.
+const userOrgCacheTTL = 5 * time.Minute
+
+type userOrgEntry struct {
+	org       string
+	fetchedAt time.Time
 }
 
 // New creates a Syncer connected to the Zitadel instance described by cfg.
@@ -63,13 +78,43 @@ func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) 
 		return nil, fmt.Errorf("grantsync: create client: %w", err)
 	}
 
-	return &Syncer{api: api, logger: logger}, nil
+	return &Syncer{api: api, logger: logger, orgCache: make(map[string]userOrgEntry)}, nil
 }
 
 // NewWithClient creates a Syncer on an existing Zitadel API client.
 // Used by the integration test harness to connect to a fake instance.
 func NewWithClient(logger *slog.Logger, api *client.Client) *Syncer {
-	return &Syncer{api: api, logger: logger}
+	return &Syncer{api: api, logger: logger, orgCache: make(map[string]userOrgEntry)}
+}
+
+// UserOrg resolves the organization (resource owner) of a user via the
+// Management API (GetUserByID), cached for userOrgCacheTTL. Used when a
+// webhook payload carries a user ID but no org (preaccesstoken).
+func (s *Syncer) UserOrg(ctx context.Context, userID string) (string, error) {
+	s.orgCacheMu.Lock()
+	if e, ok := s.orgCache[userID]; ok && time.Since(e.fetchedAt) < userOrgCacheTTL {
+		s.orgCacheMu.Unlock()
+		return e.org, nil
+	}
+	s.orgCacheMu.Unlock()
+
+	resp, err := s.api.ManagementService().GetUserByID(ctx, &management.GetUserByIDRequest{ //nolint:staticcheck // v2 API not stable yet
+		Id: userID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("get user %s: %w", userID, err)
+	}
+
+	org := resp.GetUser().GetDetails().GetResourceOwner()
+	if org == "" {
+		return "", fmt.Errorf("user %s: empty resource owner", userID)
+	}
+
+	s.orgCacheMu.Lock()
+	s.orgCache[userID] = userOrgEntry{org: org, fetchedAt: time.Now()}
+	s.orgCacheMu.Unlock()
+
+	return org, nil
 }
 
 // Sync reconciles UserGrants for userID. It lists the user's current grants,
@@ -242,25 +287,43 @@ func (s *Syncer) Client() *client.Client {
 	return s.api
 }
 
-// listUserGrants returns all active grants for a user.
+// listUserGrants returns all active grants for a user (paginated — a user
+// holding more than one page of grants must never have the tail treated as
+// nonexistent, or sync would re-add "missing" grants and miss stale ones).
 func (s *Syncer) listUserGrants(ctx context.Context, userID string) ([]*user.UserGrant, error) {
-	resp, err := s.api.ManagementService().ListUserGrants(ctx, &management.ListUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
-		Query: &object.ListQuery{Limit: 100},
-		Queries: []*user.UserGrantQuery{
-			{
-				Query: &user.UserGrantQuery_UserIdQuery{
-					UserIdQuery: &user.UserGrantUserIDQuery{
-						UserId: userID,
+	var all []*user.UserGrant
+
+	var offset uint64
+
+	const pageSize = 100
+
+	for {
+		resp, err := s.api.ManagementService().ListUserGrants(ctx, &management.ListUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
+			Query: &object.ListQuery{Limit: pageSize, Offset: offset},
+			Queries: []*user.UserGrantQuery{
+				{
+					Query: &user.UserGrantQuery_UserIdQuery{
+						UserIdQuery: &user.UserGrantUserIDQuery{
+							UserId: userID,
+						},
 					},
 				},
 			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("list user grants: %w", err)
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list user grants (offset %d): %w", offset, err)
+		}
+
+		all = append(all, resp.GetResult()...)
+
+		if uint64(len(resp.GetResult())) < pageSize {
+			break
+		}
+
+		offset += pageSize
 	}
 
-	return resp.GetResult(), nil
+	return all, nil
 }
 
 // rolesEqual compares two role slices (order-independent).

@@ -59,6 +59,30 @@ func TestSyncAll_MissingKey(t *testing.T) {
 	}
 }
 
+func TestSyncAll_EmptyConfiguredKey_AlwaysRejected(t *testing.T) {
+	// A defensive guard: if SYNC_API_KEY ends up empty, no request may
+	// authenticate — not even "Authorization: Bearer " (empty token).
+	app := newSyncAllTestApp(t, &mockSource{}, "")
+
+	for _, auth := range []string{"", "Bearer ", "Bearer x"} {
+		req := httptest.NewRequest("POST", "/sync", http.NoBody)
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+
+		resp, err := app.Test(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_ = resp.Body.Close()
+
+		if resp.StatusCode != 401 {
+			t.Fatalf("auth %q with empty configured key: expected 401, got %d", auth, resp.StatusCode)
+		}
+	}
+}
+
 func TestSyncAll_RefreshError_Returns502(t *testing.T) {
 	app := newSyncAllTestApp(t, &mockSource{refreshErr: errRefresh}, "test-key")
 

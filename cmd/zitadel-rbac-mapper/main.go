@@ -74,14 +74,19 @@ func runSyncInner() error {
 		return fmt.Errorf("load config source: %w", err)
 	}
 
-	result := reconcile.All(ctx, &reconcile.Deps{
+	result, err := reconcile.All(ctx, &reconcile.Deps{
 		Logger:    logger,
 		Source:    deps.Source,
 		Resolvers: deps.Resolvers,
 		Catalog:   deps.Catalog,
 		Syncer:    deps.Syncer,
 		Metrics:   deps.Metrics,
-	})
+	}, reconcile.Options{})
+	if err != nil {
+		// e.g. the empty-ratio safety abort: exit non-zero so the CronJob
+		// fails visibly (kube_job_status_failed alerting).
+		return fmt.Errorf("batch sync: %w", err)
+	}
 
 	out, _ := json.Marshal(result)
 	fmt.Println(string(out))
@@ -101,20 +106,23 @@ Commands:
 Environment variables:
   ZITADEL_DOMAIN          Zitadel instance domain (required)
   ZITADEL_PORT            Zitadel gRPC port (default: "443")
-  ZITADEL_KEY_JSON        JWT key JSON for service account auth (required)
+  ZITADEL_KEY_JSON        JWT key JSON for service account auth
+  ZITADEL_KEY_FILE        Path to JWT key JSON file (used when ZITADEL_KEY_JSON is unset)
   SYNC_API_KEY            API key for POST /sync endpoint (required)
   CONFIG_FILE             Path to v2 config YAML (K8s mode, ConfigMap mount)
   CONFIG_SSM_PARAM        SSM parameter with v2 config (Lambda mode)
   PORT                    HTTP server port (default: 8080)
   HEALTH_PORT             Health/metrics port (default: 7070)
   LOG_FORMAT              Log format: json|text (default: json)
+  LOG_LEVEL               Log level: debug|info|warn|error (default: info)
 
 Per-org settings (resolver URLs, rules, role patterns, bulkhead/circuit
 breaker) live in the config file — see config.example.yaml.
 
 API (server mode):
   POST /webhook  Zitadel Actions V2 webhook (JWT verified, org-aware routing)
-  POST /sync     Full reconciliation (Bearer token verified, reload config + sync all users)
+  POST /sync     Full reconciliation (Bearer token verified, reload config + sync all users;
+                 ?force=true also prunes users who resolved to zero groups)
   GET  /health   Health check (200 OK)
   GET  /metrics  Prometheus metrics (health port)
 `)

@@ -34,6 +34,10 @@ type Source interface {
 	// RoleCacheTTL returns the TTL for the Zitadel role-catalog cache.
 	RoleCacheTTL() time.Duration
 
+	// Settings returns the instance-global settings from the config document
+	// (JWT security, batch-sync safety threshold, protected roles).
+	Settings() Settings
+
 	// ForceRefresh reloads configuration from the underlying source.
 	// On failure, implementations must keep previous config and return the error.
 	ForceRefresh(ctx context.Context) error
@@ -47,7 +51,26 @@ const (
 	DefaultFailureThreshold = 5
 	DefaultOpenDuration     = 30 * time.Second
 	DefaultHalfOpenProbes   = 1
+
+	// DefaultMaxEmptyRatio is the batch-sync abort threshold: if more than
+	// this fraction of successfully resolved users come back with zero
+	// groups, the run aborts before any pruning.
+	DefaultMaxEmptyRatio = 0.2
 )
+
+// Settings are the instance-global knobs from the config document, with
+// defaults applied. Safe to call on a zero/unnormalized Config.
+type Settings struct {
+	// RequireExp rejects webhook JWT payloads without an exp claim.
+	RequireExp bool
+
+	// MaxEmptyRatio aborts a batch sync run when the fraction of resolved
+	// users with zero groups exceeds it.
+	MaxEmptyRatio float64
+
+	// ProtectedRoles are role keys never granted via rolePatterns expansion.
+	ProtectedRoles []string
+}
 
 // Config is the v2 configuration file schema.
 //
@@ -76,9 +99,58 @@ type Config struct {
 	// rolePatterns expansion and ProjectGrant resolution. Default: 5m.
 	RoleCacheTTL Duration `yaml:"roleCacheTTL"`
 
+	// Security holds instance-global webhook verification settings.
+	Security SecurityConfig `yaml:"security"`
+
+	// Sync holds batch-reconciliation safety settings.
+	Sync SyncConfig `yaml:"sync"`
+
+	// ProtectedRoles lists role keys that are NEVER granted via rolePatterns
+	// expansion — only via explicit `roles` entries. Guardrail against broad
+	// patterns (`*` matches every role key, including e.g. `cluster:admin` —
+	// `:` is not a path separator for path.Match). Default: empty.
+	ProtectedRoles []string `yaml:"protectedRoles"`
+
 	// Orgs maps Zitadel organization IDs to their configuration.
 	// Users from orgs absent here get no enrichment (fail-closed).
 	Orgs map[string]OrgConfig `yaml:"orgs"`
+}
+
+// SecurityConfig holds instance-global webhook verification settings.
+type SecurityConfig struct {
+	// RequireExp rejects webhook JWT payloads that lack an exp claim.
+	// Default: true. Set to false only if a live instance's Actions payloads
+	// are verified to lack exp (see docs/MIGRATION-v2.md).
+	RequireExp *bool `yaml:"requireExp"`
+}
+
+// SyncConfig holds batch-reconciliation safety settings.
+type SyncConfig struct {
+	// MaxEmptyRatio is the run-level safety threshold for batch sync: if more
+	// than this fraction of successfully resolved users come back with zero
+	// groups, the run aborts before any pruning (suspected resolver/directory
+	// fault). Range [0,1]. Default: 0.2.
+	MaxEmptyRatio *float64 `yaml:"maxEmptyRatio"`
+}
+
+// Settings returns the instance-global settings with defaults applied.
+// Safe to call on an unnormalized (e.g. empty startup) Config.
+func (c *Config) Settings() Settings {
+	s := Settings{
+		RequireExp:     true,
+		MaxEmptyRatio:  DefaultMaxEmptyRatio,
+		ProtectedRoles: c.ProtectedRoles,
+	}
+
+	if c.Security.RequireExp != nil {
+		s.RequireExp = *c.Security.RequireExp
+	}
+
+	if c.Sync.MaxEmptyRatio != nil {
+		s.MaxEmptyRatio = *c.Sync.MaxEmptyRatio
+	}
+
+	return s
 }
 
 // OrgConfig is the per-organization configuration: which directory resolver
@@ -169,6 +241,16 @@ func ParseConfig(data []byte) (*Config, error) {
 }
 
 func (c *Config) validate() error {
+	if r := c.Sync.MaxEmptyRatio; r != nil && (*r < 0 || *r > 1) {
+		return fmt.Errorf("sync.maxEmptyRatio must be in [0,1], got %v", *r)
+	}
+
+	for i, role := range c.ProtectedRoles {
+		if role == "" {
+			return fmt.Errorf("protectedRoles[%d]: empty role key", i)
+		}
+	}
+
 	for orgID, org := range c.Orgs {
 		if orgID == "" {
 			return fmt.Errorf("orgs: empty org ID key")

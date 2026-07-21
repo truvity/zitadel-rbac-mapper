@@ -83,6 +83,14 @@ func (s *SSMSource) RoleCacheTTL() time.Duration {
 	return s.cfg.RoleCacheTTL.Std()
 }
 
+// Settings returns the instance-global settings (defaults applied).
+func (s *SSMSource) Settings() Settings {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.cfg.Settings()
+}
+
 // ForceRefresh fetches the parameter from the Lambda extension and re-parses if changed.
 func (s *SSMSource) ForceRefresh(ctx context.Context) error {
 	data, err := s.fetchParameter(ctx)

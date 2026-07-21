@@ -100,15 +100,30 @@ func (m *Mapper) RuleCount() int {
 // ExpandRoles resolves a DesiredGrant's final role keys: exact roles are kept
 // verbatim (even if absent from the catalog — the catalog may be stale), and
 // each pattern is matched against the available role keys on the project.
+//
+// Role keys listed in protectedRoles are NEVER added via pattern expansion —
+// only explicit roles can grant them. This guards against broad patterns:
+// path.Match treats only `/` as a separator, so `*` matches every role key
+// including e.g. `cluster:admin`.
+//
 // The result is deduplicated and sorted.
-func ExpandRoles(g DesiredGrant, availableRoles []string) []string {
+func ExpandRoles(g DesiredGrant, availableRoles, protectedRoles []string) []string {
 	roleSet := make(map[string]struct{}, len(g.Roles))
 	for _, role := range g.Roles {
 		roleSet[role] = struct{}{}
 	}
 
+	protected := make(map[string]struct{}, len(protectedRoles))
+	for _, role := range protectedRoles {
+		protected[role] = struct{}{}
+	}
+
 	for _, pattern := range g.RolePatterns {
 		for _, role := range availableRoles {
+			if _, isProtected := protected[role]; isProtected {
+				continue
+			}
+
 			// Pattern syntax is validated at config load; Match cannot fail here.
 			if ok, _ := path.Match(pattern, role); ok {
 				roleSet[role] = struct{}{}

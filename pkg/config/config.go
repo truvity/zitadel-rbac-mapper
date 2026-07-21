@@ -14,9 +14,13 @@ import (
 // Config holds all service configuration loaded from environment variables.
 type Config struct {
 	// Zitadel connection (grantsync gRPC + role catalog + JWKS for webhook verification).
-	ZitadelDomain  string // Zitadel instance domain (e.g., "auth.truvity.xyz").
-	ZitadelPort    string // Zitadel gRPC port (default: "443").
-	ZitadelKeyJSON string // Raw JWT key JSON (from ZITADEL_KEY_JSON env var).
+	ZitadelDomain string // Zitadel instance domain (e.g., "auth.truvity.xyz").
+	ZitadelPort   string // Zitadel gRPC port (default: "443").
+
+	// ZitadelKeyJSON is the MachineUser JWT key JSON. Populated from
+	// ZITADEL_KEY_JSON, or read from the file at ZITADEL_KEY_FILE when the
+	// env var is unset (ZITADEL_KEY_JSON wins if both are set).
+	ZitadelKeyJSON string
 
 	// Sync API key (required).
 	SyncAPIKey string
@@ -34,6 +38,7 @@ type Config struct {
 
 	// Logging.
 	LogFormat string
+	LogLevel  string // debug|info|warn|error (default: info)
 }
 
 // Load reads configuration from environment variables and validates it.
@@ -46,6 +51,17 @@ func Load() (*Config, error) {
 		ConfigFile:     os.Getenv("CONFIG_FILE"),
 		ConfigSSMParam: os.Getenv("CONFIG_SSM_PARAM"),
 		LogFormat:      envOrDefault("LOG_FORMAT", "json"),
+		LogLevel:       envOrDefault("LOG_LEVEL", "info"),
+	}
+
+	// Key-file fallback (chart Secret mount): ZITADEL_KEY_JSON wins if both set.
+	if keyFile := os.Getenv("ZITADEL_KEY_FILE"); cfg.ZitadelKeyJSON == "" && keyFile != "" {
+		data, err := os.ReadFile(keyFile) //nolint:gosec // G304: path comes from the operator-controlled ZITADEL_KEY_FILE env (chart Secret mount), same trust as CONFIG_FILE
+		if err != nil {
+			return nil, fmt.Errorf("read ZITADEL_KEY_FILE %q: %w", keyFile, err)
+		}
+
+		cfg.ZitadelKeyJSON = string(data)
 	}
 
 	var err error
@@ -73,7 +89,13 @@ func (c *Config) validate() error {
 	}
 
 	if c.ZitadelKeyJSON == "" {
-		return fmt.Errorf("ZITADEL_KEY_JSON is required")
+		return fmt.Errorf("ZITADEL_KEY_JSON (or ZITADEL_KEY_FILE) is required")
+	}
+
+	switch c.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("invalid LOG_LEVEL %q (expected debug|info|warn|error)", c.LogLevel)
 	}
 
 	if c.SyncAPIKey == "" {

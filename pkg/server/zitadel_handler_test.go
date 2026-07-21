@@ -44,6 +44,10 @@ func (m *mockSource) Orgs() []mapper.OrgInfo {
 
 func (m *mockSource) RoleCacheTTL() time.Duration { return time.Minute }
 
+func (m *mockSource) Settings() mapper.Settings {
+	return mapper.Settings{RequireExp: true, MaxEmptyRatio: mapper.DefaultMaxEmptyRatio}
+}
+
 func (m *mockSource) ForceRefresh(_ context.Context) error { return m.refreshErr }
 
 // groupsBackend spins an httptest resolver serving fixed groups per email.
@@ -182,8 +186,14 @@ func TestWebhook_GroupsResolved_LogsInfoWithCounts(t *testing.T) {
 		t.Errorf("expected INFO log 'returning groups claim', got: %s", logs)
 	}
 
-	if !strings.Contains(logs, `"email":"user1@example.com"`) {
-		t.Errorf("expected email in enrichment log, got: %s", logs)
+	// Telemetry hygiene: user_id identifies the request; the email appears
+	// only on the debug-level hot-path line (invisible at INFO).
+	if !strings.Contains(logs, `"user_id":"u1"`) {
+		t.Errorf("expected user_id in enrichment log, got: %s", logs)
+	}
+
+	if strings.Contains(logs, `"email":"user1@example.com"`) {
+		t.Errorf("email must not be logged at INFO level on the hot path, got: %s", logs)
 	}
 
 	if !strings.Contains(logs, `"groups_count":2`) {
@@ -228,8 +238,13 @@ func TestWebhook_ZeroGroups_LogsWarnWithEmail(t *testing.T) {
 		t.Errorf("expected zero-groups warning message, got: %s", logs)
 	}
 
-	if !strings.Contains(logs, `"email":"personal@gmail.com"`) {
-		t.Errorf("expected email in zero-groups warning, got: %s", logs)
+	// Telemetry hygiene: the warning identifies the user by ID, not email.
+	if !strings.Contains(logs, `"user_id":"u1"`) {
+		t.Errorf("expected user_id in zero-groups warning, got: %s", logs)
+	}
+
+	if strings.Contains(logs, `"email":"personal@gmail.com"`) {
+		t.Errorf("email must not be logged at WARN level on the hot path, got: %s", logs)
 	}
 }
 

@@ -72,6 +72,14 @@ func (fs *FileSource) RoleCacheTTL() time.Duration {
 	return fs.cfg.RoleCacheTTL.Std()
 }
 
+// Settings returns the instance-global settings (defaults applied).
+func (fs *FileSource) Settings() Settings {
+	fs.mu.RLock()
+	defer fs.mu.RUnlock()
+
+	return fs.cfg.Settings()
+}
+
 // ForceRefresh re-reads the file and re-parses config if the content hash changed.
 // On failure, keeps previous config and returns the error.
 func (fs *FileSource) ForceRefresh(ctx context.Context) error {
