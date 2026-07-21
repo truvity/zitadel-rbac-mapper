@@ -23,6 +23,7 @@ legal entity. See `docs/MIGRATION-v2.md` for the config migration.
 ### Added
 - Hermetic integration harness (`tests/integration`, `just test-integration`, runs in CI): fake Zitadel (gRPC Management API + JWKS-signed webhook payloads) and per-org fake resolvers; covers org routing, fail-closed, bulkhead isolation, circuit-breaker recovery, pattern expansion + cache TTL, ProjectGrant-aware sync, idempotent re-sync, JWT rejection, batch /sync
 - Real-instance tests moved to `tests/e2e` (`just test-e2e`)
+- Documentation tree under `docs/` (Diátaxis-style): architecture (request flow + fail-closed matrix, per-org isolation, role catalog), install (Kubernetes/Helm incl. credential requirements, Lambda status), configuration reference (env + full v2 schema), operations (metrics catalog + suggested alerts, runbook), testing; README reduced to a front door; the initial implementation plan archived to `docs/design/`
 
 ## [0.14.0] — 2026-07-05
 
