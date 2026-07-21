@@ -1,6 +1,6 @@
-//go:build integration
+//go:build e2e
 
-// Package integration provides end-to-end tests for pkg/grantsync against a real Zitadel instance.
+// Package e2e provides end-to-end tests for pkg/grantsync against a real Zitadel instance.
 //
 // Prerequisites:
 //   - JWT key stored in system keyring: service="zitadel-rbac-mapper", username="jwt-key"
@@ -15,8 +15,8 @@
 //	rm /path/to/key.json  # delete the key file after storing to keyring
 //	Verify: secret-tool lookup service zitadel-rbac-mapper username jwt-key | head -c 20
 //
-// Run: go test -tags=integration -v ./tests/integration/...
-package integration
+// Run: go test -tags=e2e -v ./tests/e2e/...
+package e2e
 
 import (
 	"context"
@@ -51,6 +51,10 @@ var (
 	cfg       testConfig
 	projectID string
 )
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
