@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,7 @@ import (
 
 	zclient "github.com/zitadel/zitadel-go/v3/pkg/client"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
+	zobject "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/object"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/project"
 	zuser "github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user"
 	"github.com/zitadel/zitadel-go/v3/pkg/zitadel"
@@ -95,22 +97,21 @@ type fakeZitadel struct {
 	grpcAddr string
 	grpcSrv  *grpc.Server
 
-	privKey jwk.Key
+	// Signing key + served JWKS, mutable to simulate signing-key rotation.
+	keyMu    sync.Mutex
+	privKey  jwk.Key
+	jwksJSON []byte
+	keyGen   int
+
 	jwksURL string
 	httpSrv *httptest.Server
 }
 
-func newFakeZitadel(t *testing.T) *fakeZitadel {
+// makeSigningKey generates an RSA signing key with the given kid and the
+// corresponding public JWKS document.
+func makeSigningKey(t *testing.T, kid string) (jwk.Key, []byte) {
 	t.Helper()
 
-	fz := &fakeZitadel{
-		grants:  make(map[string]*zuser.UserGrant),
-		owned:   make(map[string]map[string][]string),
-		granted: make(map[string]map[string]*grantedProject),
-		users:   make(map[string][]fakeUser),
-	}
-
-	// Signing key + JWKS endpoint.
 	rawKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -121,9 +122,8 @@ func newFakeZitadel(t *testing.T) *fakeZitadel {
 		t.Fatal(err)
 	}
 
-	_ = priv.Set(jwk.KeyIDKey, "test-key-1")
+	_ = priv.Set(jwk.KeyIDKey, kid)
 	_ = priv.Set(jwk.AlgorithmKey, jwa.RS256())
-	fz.privKey = priv
 
 	pub, err := priv.PublicKey()
 	if err != nil {
@@ -138,11 +138,51 @@ func newFakeZitadel(t *testing.T) *fakeZitadel {
 		t.Fatal(err)
 	}
 
+	return priv, jwksJSON
+}
+
+// rotateKey replaces the instance signing key and the served JWKS, exactly as
+// a Zitadel signing-key rotation does. Previously issued tokens become invalid.
+func (fz *fakeZitadel) rotateKey(t *testing.T) {
+	t.Helper()
+
+	fz.keyMu.Lock()
+	defer fz.keyMu.Unlock()
+
+	fz.keyGen++
+	fz.privKey, fz.jwksJSON = makeSigningKey(t, fmt.Sprintf("test-key-%d", fz.keyGen+1))
+}
+
+// signingKey returns the current private signing key.
+func (fz *fakeZitadel) signingKey() jwk.Key {
+	fz.keyMu.Lock()
+	defer fz.keyMu.Unlock()
+
+	return fz.privKey
+}
+
+func newFakeZitadel(t *testing.T) *fakeZitadel {
+	t.Helper()
+
+	fz := &fakeZitadel{
+		grants:  make(map[string]*zuser.UserGrant),
+		owned:   make(map[string]map[string][]string),
+		granted: make(map[string]map[string]*grantedProject),
+		users:   make(map[string][]fakeUser),
+	}
+
+	// Signing key + JWKS endpoint (rotatable, see rotateKey).
+	fz.privKey, fz.jwksJSON = makeSigningKey(t, "test-key-1")
+
 	fz.httpSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/oauth/v2/keys" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+
+		fz.keyMu.Lock()
+		jwksJSON := fz.jwksJSON
+		fz.keyMu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(jwksJSON)
@@ -174,7 +214,7 @@ func newFakeZitadel(t *testing.T) *fakeZitadel {
 func (fz *fakeZitadel) sign(t *testing.T, payload []byte) []byte {
 	t.Helper()
 
-	signed, err := jws.Sign(payload, jws.WithKey(jwa.RS256(), fz.privKey))
+	signed, err := jws.Sign(payload, jws.WithKey(jwa.RS256(), fz.signingKey()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +316,7 @@ func (fz *fakeZitadel) ListUserGrants(ctx context.Context, req *management.ListU
 		}
 	}
 
-	resp := &management.ListUserGrantResponse{}
+	var matching []*zuser.UserGrant
 
 	for _, g := range fz.grants {
 		if userID != "" && g.GetUserId() != userID {
@@ -287,10 +327,49 @@ func (fz *fakeZitadel) ListUserGrants(ctx context.Context, req *management.ListU
 			continue
 		}
 
-		resp.Result = append(resp.Result, g)
+		matching = append(matching, g)
 	}
 
-	return resp, nil
+	// Real Zitadel paginates; honor Limit/Offset over a stable ordering so
+	// clients that don't page correctly see truncated results (as they would
+	// in production).
+	sort.Slice(matching, func(i, j int) bool { return matching[i].GetId() < matching[j].GetId() })
+
+	offset := req.GetQuery().GetOffset()
+	limit := uint64(req.GetQuery().GetLimit())
+
+	if offset > uint64(len(matching)) {
+		offset = uint64(len(matching))
+	}
+
+	matching = matching[offset:]
+	if limit > 0 && uint64(len(matching)) > limit {
+		matching = matching[:limit]
+	}
+
+	return &management.ListUserGrantResponse{Result: matching}, nil
+}
+
+// GetUserByID resolves a user across all orgs, returning its resource owner —
+// used by the mapper's org lookup for payloads without an org.
+func (fz *fakeZitadel) GetUserByID(_ context.Context, req *management.GetUserByIDRequest) (*management.GetUserByIDResponse, error) {
+	fz.mu.Lock()
+	defer fz.mu.Unlock()
+
+	for orgID, users := range fz.users {
+		for _, u := range users {
+			if u.id == req.GetId() {
+				return &management.GetUserByIDResponse{
+					User: &zuser.User{
+						Id:      u.id,
+						Details: &zobject.ObjectDetails{ResourceOwner: orgID},
+					},
+				}, nil
+			}
+		}
+	}
+
+	return nil, status.Errorf(codes.NotFound, "user %s not found", req.GetId())
 }
 
 func (fz *fakeZitadel) AddUserGrant(ctx context.Context, req *management.AddUserGrantRequest) (*management.AddUserGrantResponse, error) {
@@ -630,13 +709,19 @@ func newStack(t *testing.T, fz *fakeZitadel, configYAML string) *stack {
 	m := metrics.New()
 	syncer := grantsync.NewWithClient(logger, cli)
 
+	// Same wiring as app.BuildDeps: requireExp follows the live config;
+	// the unknown-kid refetch rate limit is lifted so rotation tests don't wait.
+	verifier := zitadeljwt.NewWithJWKSURL(fz.jwksURL)
+	verifier.SetRequireExp(func() bool { return source.Settings().RequireExp })
+	verifier.SetMinRefetchInterval(0)
+
 	deps := &server.Deps{
 		Logger:    logger,
 		Source:    source,
 		Resolvers: resolver.NewRegistry(logger, m),
 		Catalog:   catalog.New(logger, cli.ManagementService(), source.RoleCacheTTL, m),
 		Syncer:    syncer,
-		Verifier:  zitadeljwt.NewWithJWKSURL(fz.jwksURL),
+		Verifier:  verifier,
 		Metrics:   m,
 	}
 
@@ -687,10 +772,13 @@ func (s *stack) waitReady() {
 	s.t.Fatal("server did not become ready")
 }
 
-// webhookPayload builds an Actions V2 style function payload.
+// webhookPayload builds an Actions V2 style function payload. It carries a
+// standard exp claim (as Zitadel's JWT payloads do) — security.requireExp
+// defaults to true.
 func webhookPayload(userID, email, orgID string) []byte {
 	payload := map[string]any{
 		"function": "function/preuserinfo",
+		"exp":      time.Now().Add(5 * time.Minute).Unix(),
 		"user": map[string]any{
 			"id":       userID,
 			"username": email,
@@ -781,7 +869,7 @@ func parseGroupsClaim(body []byte) ([]string, error) {
 // test goroutine is illegal and hides failures). It returns the HTTP status,
 // the groups claim (when status is 200) and any transport/decode error.
 func (s *stack) tryLogin(userID, email, orgID string) (int, []string, error) {
-	signed, err := jws.Sign(webhookPayload(userID, email, orgID), jws.WithKey(jwa.RS256(), s.fz.privKey))
+	signed, err := jws.Sign(webhookPayload(userID, email, orgID), jws.WithKey(jwa.RS256(), s.fz.signingKey()))
 	if err != nil {
 		return 0, nil, fmt.Errorf("sign payload: %w", err)
 	}
@@ -812,7 +900,20 @@ func (s *stack) tryLogin(userID, email, orgID string) (int, []string, error) {
 func (s *stack) postSync() (int, []byte) {
 	s.t.Helper()
 
-	req, err := http.NewRequest(http.MethodPost, s.baseURL+"/sync", http.NoBody)
+	return s.postSyncURL(s.baseURL + "/sync")
+}
+
+// postSyncForce invokes POST /sync?force=true (explicit offboarding mode).
+func (s *stack) postSyncForce() (int, []byte) {
+	s.t.Helper()
+
+	return s.postSyncURL(s.baseURL + "/sync?force=true")
+}
+
+func (s *stack) postSyncURL(url string) (int, []byte) {
+	s.t.Helper()
+
+	req, err := http.NewRequest(http.MethodPost, url, http.NoBody)
 	if err != nil {
 		s.t.Fatal(err)
 	}

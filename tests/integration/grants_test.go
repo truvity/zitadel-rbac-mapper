@@ -253,3 +253,104 @@ orgs:
 		t.Errorf("removes = %d, want 1", fz.removeCalls.Load())
 	}
 }
+
+// TestListUserGrantsPagination_AllStalePruned: a user holding more grants
+// than one Management API page (100) must have ALL of them listed during
+// sync — with broken pagination, grants beyond the first page would neither
+// be seen nor pruned.
+func TestListUserGrantsPagination_AllStalePruned(t *testing.T) {
+	fz := newFakeZitadel(t)
+	fz.setOwnedProject("org-a", "proj-cluster", "cluster:admin")
+
+	// 120 stale grants (from an earlier config generation) — more than one page.
+	const staleGrants = 120
+
+	for i := range staleGrants {
+		fz.seedGrant("org-a", "user-alice", fmt.Sprintf("proj-stale-%03d", i), "old:role")
+	}
+
+	res := newFakeResolver(t, map[string][]string{
+		"alice@corp.com": {"admins@corp.com"},
+	})
+
+	config := fmt.Sprintf(`
+orgs:
+  "org-a":
+    name: "Company A"
+    resolver:
+      url: %q
+    rules:
+      - group: "admins@corp.com"
+        grants:
+          - project: "proj-cluster"
+            roles: ["cluster:admin"]
+`, res.url())
+
+	s := newStack(t, fz, config)
+
+	s.login("user-alice", "alice@corp.com", "org-a")
+
+	grants := fz.userGrants("user-alice")
+	if len(grants) != 1 {
+		t.Fatalf("grants after login = %d, want 1 (all %d stale grants pruned across pages)", len(grants), staleGrants)
+	}
+
+	if grants[0].GetProjectId() != "proj-cluster" {
+		t.Errorf("surviving grant = %+v, want proj-cluster", grants[0])
+	}
+
+	if got := fz.removeCalls.Load(); got != staleGrants {
+		t.Errorf("removeCalls = %d, want %d", got, staleGrants)
+	}
+}
+
+// TestProtectedRoles_NeverGrantedViaPatterns: role keys listed in the global
+// protectedRoles are excluded from rolePatterns expansion (a bare `*` matches
+// every role key — `:` is not a path.Match separator) but remain grantable
+// through explicit roles.
+func TestProtectedRoles_NeverGrantedViaPatterns(t *testing.T) {
+	fz := newFakeZitadel(t)
+	fz.setOwnedProject("org-a", "proj-cluster", "cluster:admin", "dmsplus:deployer", "dmsplus:viewer")
+
+	res := newFakeResolver(t, map[string][]string{
+		"dev@corp.com":   {"devs@corp.com"},
+		"admin@corp.com": {"admins@corp.com"},
+	})
+
+	config := fmt.Sprintf(`
+protectedRoles: ["cluster:admin"]
+orgs:
+  "org-a":
+    name: "Company A"
+    resolver:
+      url: %q
+    rules:
+      - group: "devs@corp.com"
+        grants:
+          - project: "proj-cluster"
+            rolePatterns: ["*"]
+      - group: "admins@corp.com"
+        grants:
+          - project: "proj-cluster"
+            roles: ["cluster:admin"]
+`, res.url())
+
+	s := newStack(t, fz, config)
+
+	// The catch-all pattern expands to everything EXCEPT the protected key.
+	s.login("user-dev", "dev@corp.com", "org-a")
+
+	roles := grantRoles(t, s, "user-dev")
+	want := []string{"dmsplus:deployer", "dmsplus:viewer"}
+
+	if fmt.Sprint(roles) != fmt.Sprint(want) {
+		t.Errorf("pattern-expanded roles = %v, want %v (cluster:admin is protected)", roles, want)
+	}
+
+	// Explicit roles still grant the protected key.
+	s.login("user-admin", "admin@corp.com", "org-a")
+
+	if roles := grantRoles(t, s, "user-admin"); fmt.Sprint(roles) != fmt.Sprint([]string{"cluster:admin"}) {
+		t.Errorf("explicit roles = %v, want [cluster:admin]", roles)
+	}
+}
