@@ -8,14 +8,23 @@ import (
 	"testing"
 )
 
-func TestFileSource_ParseValid(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.yaml")
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
 
-	content := `
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	return path
+}
+
+const fileConfigV2 = `
 orgs:
-  - id: "org-1"
+  "org-1":
     name: "Test Org"
+    resolver:
+      url: "http://ggs.svc:8080"
     rules:
       - group: "admins@example.com"
         grants:
@@ -27,121 +36,92 @@ orgs:
             roles: ["viewer"]
           - project: "monitoring"
             roles: ["viewer"]
-  - id: "org-2"
+  "org-2":
     name: "Other Org"
+    resolver:
+      url: "http://egs.svc:8080"
     rules:
       - group: "team@example.com"
         grants:
           - project: "app"
             roles: ["editor"]
 `
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	logger := slog.Default()
+func TestFileSource_ParseValid(t *testing.T) {
+	path := writeConfig(t, fileConfigV2)
 	ctx := context.Background()
 
-	fs := NewFileSource(ctx, logger, path)
+	fs := NewFileSource(ctx, slog.Default(), path)
 
 	orgs := fs.Orgs()
 	if len(orgs) != 2 {
 		t.Fatalf("expected 2 orgs, got %d", len(orgs))
 	}
 
-	rules := fs.Rules(ctx, "org-1")
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 rules for org-1, got %d", len(rules))
+	org, ok := fs.Org(ctx, "org-1")
+	if !ok {
+		t.Fatal("org-1 not found")
 	}
 
-	if rules[0].Group != "admins@example.com" {
-		t.Errorf("expected admins@example.com, got %s", rules[0].Group)
+	if len(org.Rules) != 2 {
+		t.Fatalf("expected 2 rules for org-1, got %d", len(org.Rules))
 	}
 
-	if len(rules[0].Grants) != 1 || rules[0].Grants[0].Project != "infra" {
-		t.Errorf("unexpected grants: %+v", rules[0].Grants)
+	if org.Rules[0].Group != "admins@example.com" {
+		t.Errorf("expected admins@example.com, got %s", org.Rules[0].Group)
+	}
+
+	if org.Resolver.URL != "http://ggs.svc:8080" {
+		t.Errorf("unexpected resolver url %q", org.Resolver.URL)
+	}
+}
+
+func TestFileSource_UnknownOrg(t *testing.T) {
+	path := writeConfig(t, fileConfigV2)
+	ctx := context.Background()
+
+	fs := NewFileSource(ctx, slog.Default(), path)
+
+	if _, ok := fs.Org(ctx, "org-unconfigured"); ok {
+		t.Fatal("expected unknown org to be unconfigured")
 	}
 }
 
 func TestFileSource_HashSkipOnUnchanged(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.yaml")
-
-	content := `
-orgs:
-  - id: "org-1"
-    name: "Test"
-    rules:
-      - group: "g@example.com"
-        grants:
-          - project: "p"
-            roles: ["r"]
-`
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	logger := slog.Default()
+	path := writeConfig(t, fileConfigV2)
 	ctx := context.Background()
 
-	fs := NewFileSource(ctx, logger, path)
+	fs := NewFileSource(ctx, slog.Default(), path)
 
 	// Force refresh with same content — should be a no-op.
 	if err := fs.ForceRefresh(ctx); err != nil {
 		t.Fatalf("unexpected error on refresh: %v", err)
 	}
 
-	// Rules should still be valid.
-	rules := fs.Rules(ctx, "org-1")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule, got %d", len(rules))
+	if _, ok := fs.Org(ctx, "org-1"); !ok {
+		t.Fatal("expected org-1 to remain configured")
 	}
 }
 
 func TestFileSource_ReloadOnChange(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.yaml")
-
-	content1 := `
-orgs:
-  - id: "org-1"
-    name: "Test"
-    rules:
-      - group: "g1@example.com"
-        grants:
-          - project: "p"
-            roles: ["r"]
-`
-	if err := os.WriteFile(path, []byte(content1), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	logger := slog.Default()
+	path := writeConfig(t, fileConfigV2)
 	ctx := context.Background()
 
-	fs := NewFileSource(ctx, logger, path)
+	fs := NewFileSource(ctx, slog.Default(), path)
 
-	rules := fs.Rules(ctx, "org-1")
-	if len(rules) != 1 || rules[0].Group != "g1@example.com" {
-		t.Fatalf("unexpected initial rules: %+v", rules)
-	}
-
-	// Update the file.
-	content2 := `
+	updated := `
 orgs:
-  - id: "org-1"
-    name: "Test"
+  "org-1":
+    name: "Test Org"
+    resolver:
+      url: "http://ggs-v2.svc:8080"
     rules:
       - group: "g2@example.com"
         grants:
           - project: "p"
             roles: ["r"]
-      - group: "g3@example.com"
-        grants:
-          - project: "q"
-            roles: ["s"]
 `
-	if err := os.WriteFile(path, []byte(content2), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -149,111 +129,68 @@ orgs:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	rules = fs.Rules(ctx, "org-1")
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 rules after reload, got %d", len(rules))
+	org, ok := fs.Org(ctx, "org-1")
+	if !ok {
+		t.Fatal("org-1 missing after reload")
 	}
 
-	if rules[0].Group != "g2@example.com" {
-		t.Errorf("expected g2@example.com, got %s", rules[0].Group)
+	if org.Resolver.URL != "http://ggs-v2.svc:8080" {
+		t.Errorf("expected updated resolver url, got %q", org.Resolver.URL)
+	}
+
+	if len(org.Rules) != 1 || org.Rules[0].Group != "g2@example.com" {
+		t.Errorf("unexpected rules after reload: %+v", org.Rules)
+	}
+
+	if _, ok := fs.Org(ctx, "org-2"); ok {
+		t.Error("expected org-2 to be gone after reload")
 	}
 }
 
 func TestFileSource_InvalidFileKeepsPrevious(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.yaml")
-
-	validContent := `
-orgs:
-  - id: "org-1"
-    name: "Test"
-    rules:
-      - group: "g@example.com"
-        grants:
-          - project: "p"
-            roles: ["r"]
-`
-	if err := os.WriteFile(path, []byte(validContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	logger := slog.Default()
+	path := writeConfig(t, fileConfigV2)
 	ctx := context.Background()
 
-	fs := NewFileSource(ctx, logger, path)
+	fs := NewFileSource(ctx, slog.Default(), path)
 
 	// Write invalid content.
 	if err := os.WriteFile(path, []byte("not: valid: yaml: [[["), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	err := fs.ForceRefresh(ctx)
-	if err == nil {
+	if err := fs.ForceRefresh(ctx); err == nil {
 		t.Fatal("expected error for invalid YAML")
 	}
 
-	// Previous rules should be preserved.
-	rules := fs.Rules(ctx, "org-1")
-	if len(rules) != 1 {
-		t.Fatalf("expected previous rules preserved, got %d", len(rules))
+	// Previous config should be preserved.
+	if _, ok := fs.Org(ctx, "org-1"); !ok {
+		t.Fatal("expected previous config preserved")
 	}
 }
 
-func TestFileSource_ValidationErrors(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "rules.yaml")
+func TestFileSource_ValidationFailureStartsEmpty(t *testing.T) {
+	// Org without resolver URL fails validation → empty start.
+	path := writeConfig(t, `orgs: {"o1": {name: "X", rules: []}}`)
+	ctx := context.Background()
 
-	tests := []struct {
-		name    string
-		content string
-	}{
-		{
-			"missing org id",
-			`orgs: [{name: "X", rules: [{group: "g", grants: [{project: "p", roles: ["r"]}]}]}]`,
-		},
-		{
-			"missing group",
-			`orgs: [{id: "1", name: "X", rules: [{grants: [{project: "p", roles: ["r"]}]}]}]`,
-		},
-		{
-			"missing project",
-			`orgs: [{id: "1", name: "X", rules: [{group: "g", grants: [{roles: ["r"]}]}]}]`,
-		},
-		{
-			"empty roles",
-			`orgs: [{id: "1", name: "X", rules: [{group: "g", grants: [{project: "p", roles: []}]}]}]`,
-		},
-	}
+	fs := NewFileSource(ctx, slog.Default(), path)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-
-			logger := slog.Default()
-			ctx := context.Background()
-
-			fs := NewFileSource(ctx, logger, path)
-
-			// Should start with empty rules due to validation failure.
-			orgs := fs.Orgs()
-			if len(orgs) != 0 {
-				t.Errorf("expected 0 orgs after validation failure, got %d", len(orgs))
-			}
-		})
+	if len(fs.Orgs()) != 0 {
+		t.Errorf("expected 0 orgs after validation failure, got %d", len(fs.Orgs()))
 	}
 }
 
 func TestFileSource_MissingFile(t *testing.T) {
-	logger := slog.Default()
 	ctx := context.Background()
 
-	fs := NewFileSource(ctx, logger, "/nonexistent/path/rules.yaml")
+	fs := NewFileSource(ctx, slog.Default(), "/nonexistent/path/config.yaml")
 
-	// Should start with empty rules.
-	orgs := fs.Orgs()
-	if len(orgs) != 0 {
-		t.Errorf("expected 0 orgs for missing file, got %d", len(orgs))
+	if len(fs.Orgs()) != 0 {
+		t.Errorf("expected 0 orgs for missing file, got %d", len(fs.Orgs()))
+	}
+
+	// TTL falls back to the default even with no file.
+	if fs.RoleCacheTTL() != DefaultRoleCacheTTL {
+		t.Errorf("expected default TTL, got %s", fs.RoleCacheTTL())
 	}
 }

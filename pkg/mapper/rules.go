@@ -1,22 +1,36 @@
-// Package mapper provides the rules engine that maps groups to desired Zitadel UserGrants.
+// Package mapper provides the rules engine that maps directory groups to
+// desired Zitadel UserGrants, and the per-org configuration schema (v2).
 package mapper
 
-// Rule maps a single group to one or more grants.
+import (
+	"path"
+	"sort"
+)
+
+// Rule maps a single directory group to one or more grants.
 type Rule struct {
-	Group  string  `json:"group"`
-	Grants []Grant `json:"grants"`
+	Group  string  `yaml:"group" json:"group"`
+	Grants []Grant `yaml:"grants" json:"grants"`
 }
 
 // Grant represents a desired Zitadel UserGrant (project + roles).
+//
+// Roles are exact role keys — passed through verbatim (role keys are the
+// downstream k8s group names, so exact fidelity matters).
+// RolePatterns are globs (path.Match syntax: `*`, `?`, `[...]`) expanded
+// against the roles that actually exist on the target project.
 type Grant struct {
-	Project string   `json:"project"`
-	Roles   []string `json:"roles"`
+	Project      string   `yaml:"project" json:"project"`
+	Roles        []string `yaml:"roles" json:"roles"`
+	RolePatterns []string `yaml:"rolePatterns" json:"rolePatterns"`
 }
 
-// DesiredGrant is the resolved output for a specific user: project + aggregated roles.
+// DesiredGrant is the resolved output for a specific user: project +
+// aggregated exact roles + aggregated role patterns (not yet expanded).
 type DesiredGrant struct {
-	Project string
-	Roles   []string
+	Project      string
+	Roles        []string
+	RolePatterns []string
 }
 
 // Mapper applies mapping rules to resolve desired grants from a set of groups.
@@ -30,16 +44,18 @@ func NewMapper(rules []Rule) *Mapper {
 }
 
 // MapGroups takes a list of group emails and returns the desired grants
-// by matching against the configured rules. Roles for the same project
-// are aggregated and deduplicated.
+// by matching against the configured rules. Roles and patterns for the same
+// project are aggregated and deduplicated. Output is sorted by project for
+// deterministic behavior.
 func (m *Mapper) MapGroups(groups []string) []DesiredGrant {
 	groupSet := make(map[string]struct{}, len(groups))
 	for _, g := range groups {
 		groupSet[g] = struct{}{}
 	}
 
-	// project → roles (deduplicated).
+	// project → roles / patterns (deduplicated).
 	projectRoles := make(map[string]map[string]struct{})
+	projectPatterns := make(map[string]map[string]struct{})
 
 	for _, rule := range m.rules {
 		if _, ok := groupSet[rule.Group]; !ok {
@@ -49,26 +65,29 @@ func (m *Mapper) MapGroups(groups []string) []DesiredGrant {
 		for _, grant := range rule.Grants {
 			if projectRoles[grant.Project] == nil {
 				projectRoles[grant.Project] = make(map[string]struct{})
+				projectPatterns[grant.Project] = make(map[string]struct{})
 			}
 
 			for _, role := range grant.Roles {
 				projectRoles[grant.Project][role] = struct{}{}
+			}
+
+			for _, pattern := range grant.RolePatterns {
+				projectPatterns[grant.Project][pattern] = struct{}{}
 			}
 		}
 	}
 
 	result := make([]DesiredGrant, 0, len(projectRoles))
 	for project, roleSet := range projectRoles {
-		roles := make([]string, 0, len(roleSet))
-		for role := range roleSet {
-			roles = append(roles, role)
-		}
-
 		result = append(result, DesiredGrant{
-			Project: project,
-			Roles:   roles,
+			Project:      project,
+			Roles:        sortedKeys(roleSet),
+			RolePatterns: sortedKeys(projectPatterns[project]),
 		})
 	}
+
+	sort.Slice(result, func(i, j int) bool { return result[i].Project < result[j].Project })
 
 	return result
 }
@@ -76,4 +95,37 @@ func (m *Mapper) MapGroups(groups []string) []DesiredGrant {
 // RuleCount returns the number of configured rules.
 func (m *Mapper) RuleCount() int {
 	return len(m.rules)
+}
+
+// ExpandRoles resolves a DesiredGrant's final role keys: exact roles are kept
+// verbatim (even if absent from the catalog — the catalog may be stale), and
+// each pattern is matched against the available role keys on the project.
+// The result is deduplicated and sorted.
+func ExpandRoles(g DesiredGrant, availableRoles []string) []string {
+	roleSet := make(map[string]struct{}, len(g.Roles))
+	for _, role := range g.Roles {
+		roleSet[role] = struct{}{}
+	}
+
+	for _, pattern := range g.RolePatterns {
+		for _, role := range availableRoles {
+			// Pattern syntax is validated at config load; Match cannot fail here.
+			if ok, _ := path.Match(pattern, role); ok {
+				roleSet[role] = struct{}{}
+			}
+		}
+	}
+
+	return sortedKeys(roleSet)
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	return keys
 }

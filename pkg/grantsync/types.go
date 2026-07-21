@@ -2,9 +2,14 @@ package grantsync
 
 // DesiredGrant represents a grant that should exist for a user.
 // ProjectID is the Zitadel project ID (not name).
+//
+// ProjectGrantID must be set when the project is owned by another org and
+// granted to the user's org via a ProjectGrant — the Zitadel API requires the
+// UserGrant to reference the projectGrantId in that case.
 type DesiredGrant struct {
-	ProjectID string   `json:"projectId"`
-	RoleKeys  []string `json:"roleKeys"`
+	ProjectID      string   `json:"projectId"`
+	ProjectGrantID string   `json:"projectGrantId,omitempty"`
+	RoleKeys       []string `json:"roleKeys"`
 }
 
 // SyncResult reports what changed during a Sync operation.

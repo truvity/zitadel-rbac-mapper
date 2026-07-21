@@ -30,16 +30,26 @@ type Verifier struct {
 // New creates a Verifier for the given Zitadel domain.
 // JWKS URL is derived as https://<domain>/oauth/v2/keys.
 func New(domain string) *Verifier {
+	return NewWithJWKSURL("https://" + domain + "/oauth/v2/keys")
+}
+
+// NewWithJWKSURL creates a Verifier fetching keys from an explicit JWKS URL.
+// Used by the integration test harness to point at a fake instance.
+func NewWithJWKSURL(jwksURL string) *Verifier {
 	return &Verifier{
-		jwksURL: "https://" + domain + "/oauth/v2/keys",
+		jwksURL: jwksURL,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
 }
 
+// expLeeway is the allowed clock skew when validating the exp claim.
+const expLeeway = 60 * time.Second
+
 // VerifyAndExtract verifies the JWT signature and returns the payload (JSON bytes).
 // The input is the raw request body (a compact JWS string).
+// If the payload carries a standard "exp" claim, expired tokens are rejected.
 func (v *Verifier) VerifyAndExtract(ctx context.Context, body []byte) ([]byte, error) {
 	keySet, err := v.getKeySet(ctx)
 	if err != nil {
@@ -51,7 +61,31 @@ func (v *Verifier) VerifyAndExtract(ctx context.Context, body []byte) ([]byte, e
 		return nil, fmt.Errorf("JWT verification failed: %w", err)
 	}
 
+	if err := checkExpiry(payload); err != nil {
+		return nil, err
+	}
+
 	return payload, nil
+}
+
+// checkExpiry rejects payloads whose standard "exp" claim is in the past.
+// Payloads without an exp claim are accepted (the Actions V2 payload shape
+// is not guaranteed to carry standard JWT claims).
+func checkExpiry(payload []byte) error {
+	var claims struct {
+		Exp *float64 `json:"exp"`
+	}
+
+	if err := json.Unmarshal(payload, &claims); err != nil || claims.Exp == nil {
+		return nil //nolint:nilerr // absent/unreadable exp claim: nothing to validate
+	}
+
+	expiry := time.Unix(int64(*claims.Exp), 0)
+	if time.Now().After(expiry.Add(expLeeway)) {
+		return fmt.Errorf("JWT expired at %s", expiry.UTC().Format(time.RFC3339))
+	}
+
+	return nil
 }
 
 // getKeySet fetches and caches the JWKS (lazy initialization).

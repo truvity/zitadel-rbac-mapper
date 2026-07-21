@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestHTTPResolver_ResolveGroups(t *testing.T) {
@@ -28,7 +29,7 @@ func TestHTTPResolver_ResolveGroups(t *testing.T) {
 	defer server.Close()
 
 	logger := slog.Default()
-	resolver := NewHTTPResolver(logger, server.URL)
+	resolver := NewHTTPResolver(logger, server.URL, 5*time.Second)
 
 	groups, err := resolver.ResolveGroups(context.Background(), "user@example.com")
 	if err != nil {
@@ -56,7 +57,7 @@ func TestHTTPResolver_ResolveGroups_Error(t *testing.T) {
 	defer server.Close()
 
 	logger := slog.Default()
-	resolver := NewHTTPResolver(logger, server.URL)
+	resolver := NewHTTPResolver(logger, server.URL, 5*time.Second)
 
 	_, err := resolver.ResolveGroups(context.Background(), "user@example.com")
 	if err == nil {

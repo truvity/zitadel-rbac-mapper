@@ -66,6 +66,12 @@ func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) 
 	return &Syncer{api: api, logger: logger}, nil
 }
 
+// NewWithClient creates a Syncer on an existing Zitadel API client.
+// Used by the integration test harness to connect to a fake instance.
+func NewWithClient(logger *slog.Logger, api *client.Client) *Syncer {
+	return &Syncer{api: api, logger: logger}
+}
+
 // Sync reconciles UserGrants for userID. It lists the user's current grants,
 // compares against desired, and performs add/update/remove as needed.
 // The operation is idempotent — calling Sync with the same desired grants
@@ -91,30 +97,30 @@ func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant
 	}
 
 	// Index desired grants by projectID.
-	desiredByProject := make(map[string][]string, len(desired))
+	desiredByProject := make(map[string]DesiredGrant, len(desired))
 	for _, d := range desired {
-		desiredByProject[d.ProjectID] = d.RoleKeys
+		desiredByProject[d.ProjectID] = d
 	}
 
 	var result SyncResult
 
 	// Add or update grants.
-	for projectID, desiredRoles := range desiredByProject {
+	for projectID, d := range desiredByProject {
 		if grant, exists := existingByProject[projectID]; exists {
 			// Check if roles changed.
-			if !rolesEqual(grant.GetRoleKeys(), desiredRoles) {
+			if !rolesEqual(grant.GetRoleKeys(), d.RoleKeys) {
 				s.logger.InfoContext(ctx, "updating user grant",
 					slog.String("user_id", userID),
 					slog.String("grant_id", grant.GetId()),
 					slog.String("project_id", projectID),
 					slog.Any("old_roles", grant.GetRoleKeys()),
-					slog.Any("new_roles", desiredRoles),
+					slog.Any("new_roles", d.RoleKeys),
 				)
 
 				_, err := s.api.ManagementService().UpdateUserGrant(ctx, &management.UpdateUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
 					UserId:   userID,
 					GrantId:  grant.GetId(),
-					RoleKeys: desiredRoles,
+					RoleKeys: d.RoleKeys,
 				})
 				if err != nil {
 					return nil, fmt.Errorf("update grant %s: %w", grant.GetId(), err)
@@ -123,17 +129,20 @@ func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant
 				result.Updated++
 			}
 		} else {
-			// New grant.
+			// New grant. For projects received via a ProjectGrant, the
+			// UserGrant must reference the projectGrantId.
 			s.logger.InfoContext(ctx, "adding user grant",
 				slog.String("user_id", userID),
 				slog.String("project_id", projectID),
-				slog.Any("roles", desiredRoles),
+				slog.String("project_grant_id", d.ProjectGrantID),
+				slog.Any("roles", d.RoleKeys),
 			)
 
 			_, err := s.api.ManagementService().AddUserGrant(ctx, &management.AddUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
-				UserId:    userID,
-				ProjectId: projectID,
-				RoleKeys:  desiredRoles,
+				UserId:         userID,
+				ProjectId:      projectID,
+				ProjectGrantId: d.ProjectGrantID,
+				RoleKeys:       d.RoleKeys,
 			})
 			if err != nil {
 				return nil, fmt.Errorf("add grant for project %s: %w", projectID, err)

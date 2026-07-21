@@ -1,24 +1,242 @@
 package mapper
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"path"
+	"time"
 
-// RulesSource provides RBAC mapping rules from an external source.
-// Implementations must be safe for concurrent use.
+	"gopkg.in/yaml.v3"
+)
+
+// OrgInfo holds basic organization information.
+type OrgInfo struct {
+	ID   string
+	Name string
+}
+
+// Source provides per-org mapper configuration (resolver + rules) from an
+// external source. Implementations must be safe for concurrent use.
 //
-// The three implementations:
-//   - OrgMetadataSource: reads rules from Zitadel Org Metadata (existing, retained for compatibility)
-//   - FileSource: reads rules from a mounted file (ConfigMap in K8s); refreshes via re-read + content hash
-//   - SSMSource: reads rules from AWS SSM Parameter Store via the Parameters and Secrets Lambda extension
+// The two implementations:
+//   - FileSource: reads config from a mounted file (ConfigMap in K8s); refreshes via re-read + content hash
+//   - SSMSource: reads config from AWS SSM Parameter Store via the Parameters and Secrets Lambda extension
 //     (localhost:2773 HTTP endpoint); no aws-sdk import required
-type RulesSource interface {
-	// Rules returns the current RBAC rules for the given organization.
-	// Returns nil if no rules exist for the org.
-	Rules(ctx context.Context, orgID string) []Rule
+type Source interface {
+	// Org returns the configuration for the given organization.
+	// The second return value is false if the org is not configured —
+	// callers must fail closed (no enrichment) in that case.
+	Org(ctx context.Context, orgID string) (OrgConfig, bool)
 
-	// Orgs returns all organizations that have rules configured.
+	// Orgs returns all configured organizations.
 	Orgs() []OrgInfo
 
-	// ForceRefresh reloads rules from the underlying source.
-	// On failure, implementations should keep previous rules and return the error.
+	// RoleCacheTTL returns the TTL for the Zitadel role-catalog cache.
+	RoleCacheTTL() time.Duration
+
+	// ForceRefresh reloads configuration from the underlying source.
+	// On failure, implementations must keep previous config and return the error.
 	ForceRefresh(ctx context.Context) error
+}
+
+// Default values applied by (*Config).normalize.
+const (
+	DefaultRoleCacheTTL     = 5 * time.Minute
+	DefaultResolverTimeout  = 5 * time.Second
+	DefaultMaxConcurrency   = 8
+	DefaultFailureThreshold = 5
+	DefaultOpenDuration     = 30 * time.Second
+	DefaultHalfOpenProbes   = 1
+)
+
+// Config is the v2 configuration file schema.
+//
+// Example:
+//
+//	roleCacheTTL: 5m
+//	orgs:
+//	  "376393772658861254":
+//	    name: "Truvity B.V."
+//	    resolver:
+//	      url: "http://google-group-sync.zitadel-rbac-mapper.svc:8080"
+//	      timeout: 5s
+//	      maxConcurrency: 8
+//	      circuitBreaker:
+//	        failureThreshold: 5
+//	        openDuration: 30s
+//	        halfOpenProbes: 1
+//	    rules:
+//	      - group: "engineering-admin@truvity.com"
+//	        grants:
+//	          - project: "376393789184419014"
+//	            roles: ["cluster:admin"]
+//	            rolePatterns: ["dmsplus:*"]
+type Config struct {
+	// RoleCacheTTL bounds the staleness of the Zitadel role catalog used for
+	// rolePatterns expansion and ProjectGrant resolution. Default: 5m.
+	RoleCacheTTL Duration `yaml:"roleCacheTTL"`
+
+	// Orgs maps Zitadel organization IDs to their configuration.
+	// Users from orgs absent here get no enrichment (fail-closed).
+	Orgs map[string]OrgConfig `yaml:"orgs"`
+}
+
+// OrgConfig is the per-organization configuration: which directory resolver
+// serves this org and which group→grant rules apply.
+type OrgConfig struct {
+	// Name is a human-readable org name (logging only).
+	Name string `yaml:"name"`
+
+	// Resolver describes the directory-groups resolver for this org.
+	Resolver ResolverConfig `yaml:"resolver"`
+
+	// Rules map directory groups to desired grants.
+	Rules []Rule `yaml:"rules"`
+}
+
+// ResolverConfig describes the per-org groups resolver endpoint and its
+// isolation settings (bulkhead + circuit breaker). The struct is comparable —
+// the resolver registry uses equality to detect config changes.
+type ResolverConfig struct {
+	// URL is the base URL of the resolver service
+	// (google-group-sync or entra-group-sync; same HTTP contract).
+	URL string `yaml:"url"`
+
+	// Timeout is the per-request HTTP timeout. Default: 5s.
+	Timeout Duration `yaml:"timeout"`
+
+	// MaxConcurrency bounds in-flight resolver requests for this org.
+	// Requests beyond the bound fail fast (empty enrichment). Default: 8.
+	MaxConcurrency int `yaml:"maxConcurrency"`
+
+	// CircuitBreaker configures the per-org circuit breaker.
+	CircuitBreaker CircuitBreakerConfig `yaml:"circuitBreaker"`
+}
+
+// CircuitBreakerConfig configures the per-org resolver circuit breaker.
+type CircuitBreakerConfig struct {
+	// FailureThreshold is the number of consecutive failures that opens
+	// the circuit. Default: 5.
+	FailureThreshold uint32 `yaml:"failureThreshold"`
+
+	// OpenDuration is how long the circuit stays open before probing.
+	// Default: 30s.
+	OpenDuration Duration `yaml:"openDuration"`
+
+	// HalfOpenProbes is the number of probe requests allowed in
+	// half-open state. Default: 1.
+	HalfOpenProbes uint32 `yaml:"halfOpenProbes"`
+}
+
+// Duration is a time.Duration that unmarshals from YAML/JSON strings like "5s".
+type Duration time.Duration
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
+	var s string
+	if err := node.Decode(&s); err != nil {
+		return fmt.Errorf("duration must be a string like \"5s\": %w", err)
+	}
+
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+
+	*d = Duration(parsed)
+
+	return nil
+}
+
+// Std returns the standard-library time.Duration.
+func (d Duration) Std() time.Duration { return time.Duration(d) }
+
+// ParseConfig parses and validates a v2 config document (YAML; JSON is a
+// YAML subset and works too) and applies defaults.
+func ParseConfig(data []byte) (*Config, error) {
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
+	cfg.normalize()
+
+	return &cfg, nil
+}
+
+func (c *Config) validate() error {
+	for orgID, org := range c.Orgs {
+		if orgID == "" {
+			return fmt.Errorf("orgs: empty org ID key")
+		}
+
+		if org.Resolver.URL == "" {
+			return fmt.Errorf("orgs[%s]: resolver.url is required", orgID)
+		}
+
+		if org.Resolver.MaxConcurrency < 0 {
+			return fmt.Errorf("orgs[%s]: resolver.maxConcurrency must be >= 0", orgID)
+		}
+
+		for j, rule := range org.Rules {
+			if rule.Group == "" {
+				return fmt.Errorf("orgs[%s].rules[%d]: group is required", orgID, j)
+			}
+
+			for k, grant := range rule.Grants {
+				if grant.Project == "" {
+					return fmt.Errorf("orgs[%s].rules[%d].grants[%d]: project is required", orgID, j, k)
+				}
+
+				if len(grant.Roles) == 0 && len(grant.RolePatterns) == 0 {
+					return fmt.Errorf("orgs[%s].rules[%d].grants[%d]: roles or rolePatterns must not be empty", orgID, j, k)
+				}
+
+				for _, pattern := range grant.RolePatterns {
+					if _, err := path.Match(pattern, "probe"); err != nil {
+						return fmt.Errorf("orgs[%s].rules[%d].grants[%d]: invalid rolePattern %q: %w", orgID, j, k, pattern, err)
+					}
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// normalize applies defaults to zero-valued optional fields.
+func (c *Config) normalize() {
+	if c.RoleCacheTTL == 0 {
+		c.RoleCacheTTL = Duration(DefaultRoleCacheTTL)
+	}
+
+	for orgID, org := range c.Orgs {
+		r := &org.Resolver
+		if r.Timeout == 0 {
+			r.Timeout = Duration(DefaultResolverTimeout)
+		}
+
+		if r.MaxConcurrency == 0 {
+			r.MaxConcurrency = DefaultMaxConcurrency
+		}
+
+		cb := &r.CircuitBreaker
+		if cb.FailureThreshold == 0 {
+			cb.FailureThreshold = DefaultFailureThreshold
+		}
+
+		if cb.OpenDuration == 0 {
+			cb.OpenDuration = Duration(DefaultOpenDuration)
+		}
+
+		if cb.HalfOpenProbes == 0 {
+			cb.HalfOpenProbes = DefaultHalfOpenProbes
+		}
+
+		c.Orgs[orgID] = org
+	}
 }
