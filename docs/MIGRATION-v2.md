@@ -2,7 +2,11 @@
 
 v2 is a **breaking** config change. The mapper and its config always deploy
 together — there is no compatibility mode. Deploy the new binary and the new
-config in the same rollout.
+config in the same rollout, then run the
+[post-deploy verification](operations/runbook.md#post-deploy-verification).
+
+Field-by-field schema documentation:
+[configuration reference](reference/configuration.md).
 
 ## What changed and why
 
@@ -93,4 +97,15 @@ Migration steps per org entry:
   (e.g. the Platform org) and shared via ProjectGrant, the UserGrant now
   carries the `projectGrantId` automatically. No config change needed.
 - **Metrics**: new Prometheus endpoint on the health port (`GET /metrics`)
-  with per-org labels. See `pkg/metrics/metrics.go` for the metric set.
+  with per-org labels. See the [metrics reference](operations/metrics.md)
+  for the full catalog and suggested alerts.
+- **JWT verification** additionally rejects payloads whose `exp` claim is
+  more than 60 seconds in the past (previously signature-only).
+
+## After the rollout
+
+- Verify per the [runbook](operations/runbook.md#post-deploy-verification):
+  startup `orgs=` count, a test login per org, one manual `POST /sync`.
+- Alert on `rbac_mapper_unknown_org_total` — under v1 an unlisted org still
+  received a groups claim; under v2 it silently gets nothing, and this
+  metric is how you notice an org you forgot to migrate.

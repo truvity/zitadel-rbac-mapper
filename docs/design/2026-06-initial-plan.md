@@ -1,5 +1,11 @@
 # Zitadel RBAC Mapper — Architecture & Implementation Plan
 
+> **Historical document** (June 2026, pre-v1). Kept for design context only —
+> much of it no longer matches the implementation: `GROUPS_RESOLVER_URL`,
+> `RULES_FILE`, HMAC verification, optional JWT verification, and the
+> sidecar/`pkg/auth`/`pkg/zitadel` layout were superseded by the v2 org-aware
+> router. Current truth lives in [docs/](../README.md).
+
 **Linear:** INF-369 (parent: INF-363)  
 **Role:** Standalone webhook for Zitadel Actions v2 (events → groups → grants mapping). Follows patterns established by google-group-sync.
 
