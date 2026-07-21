@@ -83,7 +83,9 @@ cronJob:
       memory: 128Mi
 
 # Optional HTTPRoute (Envoy Gateway) — default off.
-# The webhook is the one external surface (called by Zitadel Actions).
+# The webhook is the one external surface (called by Zitadel Actions): the
+# default rule matches path /webhook only, keeping /sync (Bearer-authed admin
+# surface) and /health cluster-internal. Override `rules` to change routing.
 httpRoute:
   enabled: false
   parentRefs: []
