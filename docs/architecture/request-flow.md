@@ -35,26 +35,37 @@ fail a login**. Enrichment degrades; authentication does not.
 ### 1. JWT verification
 
 The request body is not JSON — it is a compact JWS signed by the Zitadel
-instance (Actions V2 `PAYLOAD_TYPE_JWT`). The verifier
-(`pkg/zitadeljwt`) fetches the instance JWKS from
-`https://<ZITADEL_DOMAIN>/oauth/v2/keys`, verifies the signature, and rejects
-payloads whose standard `exp` claim is more than 60 seconds in the past
-(payloads without an `exp` claim are accepted — the Actions V2 payload shape
-does not guarantee standard JWT claims). Verification failure → `401`, no
-further processing.
+instance (Actions V2 `PAYLOAD_TYPE_JWT`). The verifier (`pkg/zitadeljwt`):
 
-The JWKS is fetched lazily on first use and cached for the lifetime of the
-process. After a Zitadel signing-key rotation, restart the mapper pods (see
-the [runbook](../operations/runbook.md#zitadel-signing-key-rotation)).
+- pins the accepted algorithms to the RS256 family (RS256/RS384/RS512) —
+  `alg: none` and HMAC (key-confusion) tokens are rejected before any
+  verification;
+- fetches the instance JWKS from `https://<ZITADEL_DOMAIN>/oauth/v2/keys`
+  and verifies the signature;
+- rejects payloads whose standard `exp` claim is more than 60 seconds in the
+  past, and — by default (`security.requireExp: true`) — payloads without an
+  `exp` claim at all (escape hatch: [migration](../MIGRATION-v2.md#behavior-changes)).
+
+Verification failure → `401`, no further processing.
+
+The JWKS cache auto-refreshes: periodically (15 min) and immediately when a
+token references an unknown key ID (rate-limited to 1/min). Signing-key
+rotation needs no restart (see the
+[runbook](../operations/runbook.md#zitadel-signing-key-rotation)).
 
 ### 2. Org routing — fail closed
 
 The user's organization is taken from the **verified** payload (`org.id`) —
-never from a header or an unverified field. The org ID selects the org's
-entry in the [v2 config](../reference/configuration.md): its resolver, its
-isolation settings, its rules.
+never from a header or an unverified field. When the payload carries a
+`user.id` but no org (as `preaccesstoken` payloads may), the mapper resolves
+the org via the Management API (GetUserByID → resource owner, cached ~5m;
+`rbac_mapper_webhook_org_source_total{source=payload|lookup|lookup_failed}`)
+and continues with normal routing. The org ID selects the org's entry in the
+[v2 config](../reference/configuration.md): its resolver, its isolation
+settings, its rules.
 
-A missing, empty, or unconfigured org ID fails **closed**: the mapper returns
+A missing, empty, or unconfigured org ID (including a failed lookup) fails
+**closed**: the mapper returns
 a successful response with an empty `groups` claim (the login proceeds), logs
 a warning with the org ID, and increments
 `rbac_mapper_unknown_org_total{org=...}`. No resolver call, no grant sync.
@@ -91,9 +102,13 @@ against a cache that may be stale).
 
 ### 5. UserGrant sync
 
-If (and only if) at least one group was resolved, the mapper reconciles the
-user's UserGrants against the desired set: list current grants, then
-add/update/remove only the deltas. Re-delivering the same webhook performs
+If (and only if) at least one group was resolved **and the org has at least
+one rule** (a zero-rules org claims no grant authority — its desired state
+would always be empty, so syncing would wipe every existing grant), the
+mapper reconciles the user's UserGrants against the desired set: list
+current grants (paginated), then add/update/remove only the deltas.
+`rolePatterns` expansion never emits role keys listed in the global
+`protectedRoles` — those are grantable via explicit `roles` only. Re-delivering the same webhook performs
 zero writes (idempotent). The per-user lock shared with the batch sync path
 prevents a `/sync` run and a login racing on the same user.
 
@@ -125,9 +140,12 @@ Every input class, its exact behavior, and the metric it leaves behind
 | Input | HTTP | Response body | `outcome` | Side effects |
 | --- | --- | --- | --- | --- |
 | Body is not a valid JWS / wrong signing key | 401 | `{"error": "JWT verification failed"}` | `invalid_jwt` (org=`unknown`) | error log |
+| Algorithm outside RS256/RS384/RS512 (`none`, HS\*) | 401 | same | `invalid_jwt` (org=`unknown`) | error log |
 | JWT `exp` more than 60s in the past | 401 | same | `invalid_jwt` (org=`unknown`) | error log |
+| No `exp` claim while `security.requireExp` (default) | 401 | same | `invalid_jwt` (org=`unknown`) | error log |
 | Verified payload is not parseable JSON | 400 | `{"error": "invalid payload"}` | `bad_payload` (org=`unknown`) | error log |
-| Payload has no `org` / empty `org.id` | 200 | empty `groups` claim | `unknown_org` (org=`unknown`) | warn log, `unknown_org_total` |
+| Payload has no `org`, user org lookup succeeds | — | — | *(continues with the looked-up org)* | `org_source_total{source="lookup"}` |
+| Payload has no `org`, user org lookup fails | 200 | empty `groups` claim | `unknown_org` (org=`unknown`) | warn log, `unknown_org_total`, `org_source_total{source="lookup_failed"}` |
 | `org.id` not in config | 200 | empty `groups` claim | `unknown_org` (org=ID) | warn log, `unknown_org_total{org=ID}` |
 | Machine user (identifier without `@`) | 200 | empty `groups` claim | `machine` | — |
 | Bulkhead saturated | 200 | empty `groups` claim | `empty` | resolver outcome `rejected`, warn log |
@@ -135,6 +153,7 @@ Every input class, its exact behavior, and the metric it leaves behind
 | Resolver error / timeout | 200 | empty `groups` claim | `empty` | resolver outcome `error`, warn log |
 | User resolves to zero groups | 200 | empty `groups` claim | `empty` | warn log ("identity may lack directory group membership") |
 | Groups resolved | 200 | `groups` claim | `enriched` | grant sync (add/update/remove deltas) |
+| Groups resolved, org has zero rules | 200 | `groups` claim | `enriched` | **no** grant sync (no authority) |
 | Groups resolved, grant sync fails | 200 | `groups` claim still returned | `enriched` | warn log, `grant_sync_errors_total` |
 
 The 4xx rows are the only ones where the mapper reports failure to Zitadel;

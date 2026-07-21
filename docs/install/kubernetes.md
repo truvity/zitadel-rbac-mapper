@@ -58,16 +58,16 @@ kubectl -n zitadel-rbac-mapper create secret generic zitadel-rbac-mapper-secrets
   --from-literal=SYNC_API_KEY="$(openssl rand -hex 32)"
 ```
 
-The binary reads the MachineUser key from the `ZITADEL_KEY_JSON` environment
-variable, so wire the Secret via `envFrom` (below). `SYNC_API_KEY` is
-required — it protects `POST /sync` and is consumed by anything that
-triggers batch reconciliation externally.
+Two equivalent ways to deliver the MachineUser key:
 
-> **Known gap:** the chart's `zitadelKey.*` values mount the key file and set
-> a `ZITADEL_KEY_FILE` environment variable, but the current binary does not
-> read `ZITADEL_KEY_FILE` — it requires `ZITADEL_KEY_JSON` and fails startup
-> without it. Until that is reconciled, use the `envFrom` Secret mechanism
-> shown here and leave `zitadelKey.secretName` unset.
+- **`envFrom` Secret** (shown below): the binary reads `ZITADEL_KEY_JSON`
+  from the environment.
+- **File mount**: set `zitadelKey.secretName` — the chart mounts the Secret
+  and sets `ZITADEL_KEY_FILE`; the binary reads the key JSON from that file.
+  If both are present, `ZITADEL_KEY_JSON` wins.
+
+`SYNC_API_KEY` is required — it protects `POST /sync` and is consumed by
+anything that triggers batch reconciliation externally.
 
 ### 2. Install
 
@@ -114,17 +114,14 @@ does not watch the file; it reloads on restart or on `POST /sync`.
 | `envFrom` | `[]` | Secret/ConfigMap refs for sensitive env (`ZITADEL_KEY_JSON`, `SYNC_API_KEY`) |
 | `orgsConfig` | `{}` | The raw v2 config document → ConfigMap → `/etc/config/config.yaml` |
 | `syncAPIKey` | `""` | Alternative to `envFrom` for `SYNC_API_KEY` (rendered as a plain env value — prefer the Secret) |
-| `zitadelKey.*` | — | Key-file mount; **currently not consumed by the binary** (see the note above) |
+| `zitadelKey.*` | — | Mounts the MachineUser key Secret and sets `ZITADEL_KEY_FILE` — the alternative to delivering `ZITADEL_KEY_JSON` via `envFrom` |
 | `cronJob.enabled` / `cronJob.schedule` | `true` / `*/15 * * * *` | Batch reconciliation Job (`sync` subcommand, `concurrencyPolicy: Forbid`); inherits `env`, `envFrom`, config mount, nodeSelector/tolerations/affinity |
 | `replicaCount` | `1` | The service is stateless (per-user locks are best-effort per replica; batch `/sync` remains the reconciliation authority) |
 | `service.port` / `healthPort` | `8080` / `7070` | Webhook port / health+metrics port |
-| `httpRoute.enabled` | `false` | HTTPRoute (Envoy Gateway) for the webhook — the one external surface |
+| `httpRoute.enabled` | `false` | HTTPRoute (Envoy Gateway) for the webhook. The default rule matches path `/webhook` only — `/sync` (Bearer-authed admin surface) and `/health` stay cluster-internal; override `httpRoute.rules` to change |
 | `ciliumNetworkPolicy.enabled` | `false` | Restrict webhook ingress to `ciliumNetworkPolicy.ingressFrom` endpoints |
 | `rbac.enabled` | `false` | Optional Role/RoleBinding for the ServiceAccount (`rbac.rules` verbatim) |
 | `resources`, `nodeSelector`, `tolerations`, `affinity` | see `values.yaml` | Standard scheduling knobs (Deployment and CronJob) |
-
-Note: `values.yaml` ships a `LOG_LEVEL` env entry, but the binary currently
-has no log-level knob (level is fixed at INFO; only `LOG_FORMAT` is read).
 
 ### 4. Wire Zitadel Actions V2
 

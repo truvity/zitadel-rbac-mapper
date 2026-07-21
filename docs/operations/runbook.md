@@ -26,8 +26,8 @@ After every install or upgrade:
 3. **Test login.** Log in as a user from a configured org; verify the token
    carries the `groups` claim and
    `rbac_mapper_webhook_requests_total{outcome="enriched"}` incremented for
-   that org. The per-request log line shows `email`, `groups_count`,
-   `grants_count`.
+   that org. The per-request log line shows `user_id`, `groups_count`,
+   `grants_count` (emails appear only at `LOG_LEVEL=debug`).
 4. **Manual reconciliation.** Trigger a batch sync and read the result:
 
    ```bash
@@ -96,15 +96,43 @@ logic:
   `concurrencyPolicy: Forbid`): runs the `sync` subcommand — load config,
   then per org: list human users, resolve groups, reconcile grants including
   pruning; prints a JSON summary and exits non-zero on startup/config
-  failure. Per-org and per-user failures are logged and skipped, never
-  fatal.
+  failure **or on a safety abort** (below). Per-org and per-user failures
+  are logged and skipped, never fatal.
 - **`POST /sync`** (Bearer `SYNC_API_KEY`): same reconciliation in the
   server process, preceded by a config force-refresh; per-user locks
   coordinate with concurrent logins. Returns the JSON summary; 401 on bad
-  token, 502 problem+json when the config refresh fails.
+  token, 502 problem+json when the config refresh fails, 500 problem+json
+  `sync-aborted` on a safety abort.
+
+### Pruning authority, precisely
+
+Pruning (grant removal on group loss) requires the user to **resolve
+successfully with a non-empty group list** whose rule matches no longer cover
+the grant:
+
+- **Resolution fails** (resolver error/timeout/circuit open): user skipped,
+  logged — no authority, nothing pruned.
+- **Resolution succeeds with zero groups**: user skipped and counted in the
+  summary's `users_skipped_empty` — empty is treated as "no authoritative
+  data", not "revoke everything". A resolver that degrades into returning
+  `200 []` for everyone therefore cannot mass-revoke the platform.
+- **Run-level abort**: if more than `sync.maxEmptyRatio` (default 0.2) of
+  the successfully resolved users come back empty, the whole run aborts
+  **before any write** — error return / HTTP 500,
+  `rbac_mapper_sync_aborts_total{reason="empty_ratio"}` incremented. That
+  ratio is the signature of a directory/resolver fault, not of group churn.
+
+**Offboarding:** a genuinely fully offboarded user (zero directory groups)
+is deliberately *not* pruned by routine batch runs. Complete offboarding is
+handled by user deactivation / org removal in Zitadel — or run
+**`POST /sync?force=true`** (same Bearer auth): force syncs empty-resolution
+users (pruning their grants) and bypasses the empty-ratio abort. Only force
+a run after confirming the resolvers are healthy — with a faulty resolver,
+force does exactly the mass-prune the guardrails exist to prevent.
 
 Your directory-revocation SLO is therefore bounded by the CronJob interval
-(plus one resolver TTL, if the resolver caches memberships).
+(plus one resolver TTL, if the resolver caches memberships); full-offboarding
+cleanup additionally needs deactivation/org removal or a forced run.
 
 ## Config changes
 
@@ -122,25 +150,27 @@ Your directory-revocation SLO is therefore bounded by the CronJob interval
 
 ## Zitadel signing-key rotation
 
-The webhook verifier caches the instance JWKS **for the lifetime of the
-process** (fetched once, lazily). After Zitadel rotates its signing keys,
-webhook requests fail with 401 / outcome `invalid_jwt` until the mapper pods
-are restarted:
+Handled automatically — **no restart needed**. The webhook verifier caches
+the instance JWKS and refreshes it two ways: a periodic refresh (every 15
+minutes) and an immediate refetch when a token references an unknown key ID
+(the rotation signature), rate-limited to one per minute so unverified
+traffic can't hammer the JWKS endpoint. After a rotation, the first request
+signed by the new key triggers the refetch; at most a few requests within
+the same minute may see 401 / `invalid_jwt` before the cache converges.
 
-```bash
-kubectl -n zitadel-rbac-mapper rollout restart deploy/zitadel-rbac-mapper
-```
-
-A sudden 100% `invalid_jwt` rate across all orgs is the signature of this
-condition (or of traffic that isn't Zitadel).
+A **sustained** 100% `invalid_jwt` rate across all orgs therefore no longer
+means "restart after rotation" — it means the JWKS endpoint is unreachable
+from the pods, or the traffic isn't Zitadel.
 
 ## Triage index
 
 | Signal | First look |
 | --- | --- |
 | `unknown_org_total` climbing | Which org ID (label/warn log)? Real company → onboard it; unexpected → investigate the caller |
-| `outcome="invalid_jwt"` spike | Key rotation (restart pods) or non-Zitadel traffic hitting the webhook |
-| `outcome="empty"` climbing, circuit closed | Resolver returning empty/erroring per-user, or users genuinely lacking directory groups — per-request WARN logs carry the email |
+| `outcome="invalid_jwt"` spike | Brief blip: key rotation converging (self-heals within ~1 min). Sustained: JWKS endpoint unreachable, payloads without `exp` (see `security.requireExp`), or non-Zitadel traffic hitting the webhook |
+| `outcome="empty"` climbing, circuit closed | Resolver returning empty/erroring per-user, or users genuinely lacking directory groups — per-request WARN logs carry the `user_id` (emails at debug level) |
+| `sync_aborts_total{reason="empty_ratio"}` > 0 | Batch sync refused to prune: too many users resolved to zero groups — check the resolver/directory backend before anything else ([pruning authority](#pruning-authority-precisely)) |
+| `webhook_org_source_total{source="lookup_failed"}` > 0 | Payloads without an org whose user lookup failed (fail-closed) — Management API reachability or tokens for deleted users |
 | `grant_sync_errors_total` > 0 | Management API errors: MachineUser permissions (org membership missing?), Zitadel availability, or ProjectGrant adds degraded by a cold role catalog |
 | `role_catalog_refresh_total{outcome="error"}` | Management API reachability/permissions; pattern grants running stale ([semantics](../architecture/role-catalog.md)) |
-| CronJob failing | `kubectl logs job/...`: startup/config errors are fatal there (unlike per-user errors, which are logged and skipped) |
+| CronJob failing | `kubectl logs job/...`: startup/config errors and safety aborts are fatal there (unlike per-user errors, which are logged and skipped) |

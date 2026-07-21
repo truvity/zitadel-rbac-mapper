@@ -86,7 +86,9 @@ During an org's resolver outage, for that org only:
 - logins **succeed** with empty claims (no `groups`, no new grants) — outcome
   `empty`;
 - existing UserGrants are **not pruned** (the zero-groups login path never
-  removes grants; batch sync skips users whose resolution fails);
+  removes grants; batch sync skips users whose resolution fails or resolves
+  empty, and aborts entirely on a mass-empty result — see the
+  [runbook](../operations/runbook.md#pruning-authority-precisely));
 - batch sync skips the org's users with warnings.
 
 Everything is bounded, nothing queues, and the blast radius of a directory
