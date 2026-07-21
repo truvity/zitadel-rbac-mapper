@@ -1,6 +1,6 @@
-# Integration Tests
+# End-to-End Tests (real Zitadel)
 
-Integration tests run against a real Zitadel Cloud instance. They are **not** run in CI — only locally by developers.
+End-to-end tests run against a real Zitadel Cloud instance. They are **not** run in CI — only locally by developers. (The hermetic integration suite lives in `tests/integration/` and runs in CI.)
 
 ## Prerequisites
 
@@ -38,13 +38,13 @@ EOF
 ### 3. Run
 
 ```bash
-just test-integration
+just test-e2e
 ```
 
 Or directly:
 
 ```bash
-go test -tags=integration -v -count=1 ./tests/integration/...
+go test -tags=e2e -v -count=1 ./tests/e2e/...
 ```
 
 ## Test Scenarios

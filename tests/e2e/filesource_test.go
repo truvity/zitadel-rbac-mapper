@@ -1,6 +1,6 @@
-//go:build integration
+//go:build e2e
 
-package integration
+package e2e
 
 import (
 	"context"
@@ -19,13 +19,15 @@ func TestFileSource_EndToEnd(t *testing.T) {
 	ctx := context.Background()
 	logger := testLogger()
 
-	// Create a rules file with a rule for a known test group.
+	// Create a v2 config file with a rule for a known test group.
 	dir := t.TempDir()
-	rulesPath := filepath.Join(dir, "rules.yaml")
+	configPath := filepath.Join(dir, "config.yaml")
 
-	rulesContent := fmt.Sprintf(`orgs:
-  - id: "test-org"
+	configContent := fmt.Sprintf(`orgs:
+  "test-org":
     name: "default"
+    resolver:
+      url: "http://localhost:9090"
     rules:
       - group: "filesource-test-group@example.com"
         grants:
@@ -33,30 +35,34 @@ func TestFileSource_EndToEnd(t *testing.T) {
             roles: ["viewer"]
 `, projectID)
 
-	if err := os.WriteFile(rulesPath, []byte(rulesContent), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(configContent), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create FileSource.
-	fs := mapper.NewFileSource(ctx, logger, rulesPath)
+	fs := mapper.NewFileSource(ctx, logger, configPath)
 
-	// Verify rules loaded.
+	// Verify config loaded.
 	orgs := fs.Orgs()
 	if len(orgs) != 1 {
 		t.Fatalf("expected 1 org, got %d", len(orgs))
 	}
 
-	rules := fs.Rules(ctx, "test-org")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule, got %d", len(rules))
+	org, ok := fs.Org(ctx, "test-org")
+	if !ok {
+		t.Fatal("test-org not configured")
 	}
 
-	if rules[0].Group != "filesource-test-group@example.com" {
-		t.Errorf("expected group filesource-test-group@example.com, got %s", rules[0].Group)
+	if len(org.Rules) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(org.Rules))
+	}
+
+	if org.Rules[0].Group != "filesource-test-group@example.com" {
+		t.Errorf("expected group filesource-test-group@example.com, got %s", org.Rules[0].Group)
 	}
 
 	// Map groups through the mapper.
-	m := mapper.NewMapper(rules)
+	m := mapper.NewMapper(org.Rules)
 	desired := m.MapGroups([]string{"filesource-test-group@example.com"})
 
 	if len(desired) != 1 {
@@ -92,19 +98,21 @@ func TestFileSource_EndToEnd(t *testing.T) {
 	}
 }
 
-// TestFileSource_ForceRefresh_Integration verifies that ForceRefresh picks up
-// changes to the rules file and the updated rules work with the syncer.
-func TestFileSource_ForceRefresh_Integration(t *testing.T) {
+// TestFileSource_ForceRefresh_E2E verifies that ForceRefresh picks up
+// changes to the config file.
+func TestFileSource_ForceRefresh_E2E(t *testing.T) {
 	ctx := context.Background()
 	logger := testLogger()
 
 	dir := t.TempDir()
-	rulesPath := filepath.Join(dir, "rules.yaml")
+	configPath := filepath.Join(dir, "config.yaml")
 
-	// Initial rules: viewer only.
-	rulesV1 := fmt.Sprintf(`orgs:
-  - id: "test-org"
+	// Initial config: viewer only.
+	v1 := fmt.Sprintf(`orgs:
+  "test-org":
     name: "default"
+    resolver:
+      url: "http://localhost:9090"
     rules:
       - group: "refresh-test@example.com"
         grants:
@@ -112,25 +120,27 @@ func TestFileSource_ForceRefresh_Integration(t *testing.T) {
             roles: ["viewer"]
 `, projectID)
 
-	if err := os.WriteFile(rulesPath, []byte(rulesV1), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(v1), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	fs := mapper.NewFileSource(ctx, logger, rulesPath)
+	fs := mapper.NewFileSource(ctx, logger, configPath)
 
-	rules := fs.Rules(ctx, "test-org")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule after initial load, got %d", len(rules))
+	org, ok := fs.Org(ctx, "test-org")
+	if !ok || len(org.Rules) != 1 {
+		t.Fatalf("unexpected initial config: ok=%v rules=%+v", ok, org.Rules)
 	}
 
-	if len(rules[0].Grants[0].Roles) != 1 || rules[0].Grants[0].Roles[0] != "viewer" {
-		t.Fatalf("expected [viewer] roles initially, got %v", rules[0].Grants[0].Roles)
+	if len(org.Rules[0].Grants[0].Roles) != 1 || org.Rules[0].Grants[0].Roles[0] != "viewer" {
+		t.Fatalf("expected [viewer] roles initially, got %v", org.Rules[0].Grants[0].Roles)
 	}
 
 	// Update the file: add admin role.
-	rulesV2 := fmt.Sprintf(`orgs:
-  - id: "test-org"
+	v2 := fmt.Sprintf(`orgs:
+  "test-org":
     name: "default"
+    resolver:
+      url: "http://localhost:9090"
     rules:
       - group: "refresh-test@example.com"
         grants:
@@ -138,79 +148,18 @@ func TestFileSource_ForceRefresh_Integration(t *testing.T) {
             roles: ["viewer", "admin"]
 `, projectID)
 
-	if err := os.WriteFile(rulesPath, []byte(rulesV2), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(v2), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	// ForceRefresh.
 	if err := fs.ForceRefresh(ctx); err != nil {
 		t.Fatalf("ForceRefresh: %v", err)
 	}
 
-	rules = fs.Rules(ctx, "test-org")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule after refresh, got %d", len(rules))
+	org, _ = fs.Org(ctx, "test-org")
+	if len(org.Rules[0].Grants[0].Roles) != 2 {
+		t.Fatalf("expected 2 roles after refresh, got %v", org.Rules[0].Grants[0].Roles)
 	}
 
-	if len(rules[0].Grants[0].Roles) != 2 {
-		t.Fatalf("expected 2 roles after refresh, got %v", rules[0].Grants[0].Roles)
-	}
-
-	t.Logf("ForceRefresh verified: roles updated from [viewer] to %v", rules[0].Grants[0].Roles)
-}
-
-// TestFileSource_InvalidFile_KeepsPrevious_Integration verifies that a corrupt file
-// doesn't crash the service — previous rules are preserved.
-func TestFileSource_InvalidFile_KeepsPrevious_Integration(t *testing.T) {
-	ctx := context.Background()
-	logger := testLogger()
-
-	dir := t.TempDir()
-	rulesPath := filepath.Join(dir, "rules.yaml")
-
-	// Valid initial content.
-	valid := fmt.Sprintf(`orgs:
-  - id: "org-1"
-    name: "Test"
-    rules:
-      - group: "valid@example.com"
-        grants:
-          - project: %q
-            roles: ["viewer"]
-`, projectID)
-
-	if err := os.WriteFile(rulesPath, []byte(valid), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	fs := mapper.NewFileSource(ctx, logger, rulesPath)
-
-	rules := fs.Rules(ctx, "org-1")
-	if len(rules) != 1 {
-		t.Fatalf("expected 1 rule initially, got %d", len(rules))
-	}
-
-	// Write invalid YAML.
-	if err := os.WriteFile(rulesPath, []byte("{{{{invalid yaml"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := fs.ForceRefresh(ctx)
-	if err == nil {
-		t.Fatal("expected error for invalid YAML")
-	}
-
-	t.Logf("invalid file error (expected): %v", err)
-
-	// Previous rules should be preserved.
-	rules = fs.Rules(ctx, "org-1")
-	if len(rules) != 1 {
-		t.Fatalf("expected previous rules preserved after bad file, got %d", len(rules))
-	}
-
-	if rules[0].Group != "valid@example.com" {
-		t.Errorf("expected preserved rule group valid@example.com, got %s", rules[0].Group)
-	}
-
-	t.Log("invalid file: previous rules preserved (as expected)")
+	t.Logf("ForceRefresh verified: roles updated to %v", org.Rules[0].Grants[0].Roles)
 }

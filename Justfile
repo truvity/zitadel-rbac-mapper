@@ -16,9 +16,13 @@ build: fmt
 test:
     go test ./... -coverprofile=coverage.out
 
-# Run integration tests (requires real Zitadel + keyring credentials)
+# Run integration tests (hermetic — fake Zitadel + fake resolvers, no external services)
 test-integration:
     go test -tags=integration -v -count=1 -timeout=120s ./tests/integration/...
+
+# Run end-to-end tests (requires real Zitadel + keyring credentials)
+test-e2e:
+    go test -tags=e2e -v -count=1 -timeout=120s ./tests/e2e/...
 
 # Run linters
 lint:
@@ -36,8 +40,8 @@ tidy:
 clean:
     rm -rf bin/ dist/ coverage.out
 
-# Run all checks (build + test + lint + vuln)
-check: build test lint vuln
+# Run all checks (build + unit tests + integration tests + lint + vuln)
+check: build test test-integration lint vuln
 
 # Build a snapshot release locally (no push, no tag)
 snapshot:
