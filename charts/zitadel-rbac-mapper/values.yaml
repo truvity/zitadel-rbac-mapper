@@ -68,6 +68,10 @@ zitadelKey:
 orgsConfig: {}
 
 # Sync API key (used by CronJob and external schedulers).
+# When empty (default), the SYNC_API_KEY env var is not rendered — deliver the
+# key via envFrom instead (e.g. an ESO-managed Secret sourced from SSM).
+# Setting a value here renders SYNC_API_KEY as a plain env value; prefer the
+# Secret path for anything beyond local experiments.
 syncAPIKey: ""
 
 # CronJob for full grant reconciliation.
