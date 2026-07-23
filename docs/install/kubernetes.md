@@ -113,7 +113,7 @@ does not watch the file; it reloads on restart or on `POST /sync`.
 | `env.*` | see `values.yaml` | Rendered verbatim as container env; instance-level settings only ([reference](../reference/configuration.md#environment-variables)) |
 | `envFrom` | `[]` | Secret/ConfigMap refs for sensitive env (`ZITADEL_KEY_JSON`, `SYNC_API_KEY`) |
 | `orgsConfig` | `{}` | The raw v2 config document → ConfigMap → `/etc/config/config.yaml` |
-| `syncAPIKey` | `""` | Alternative to `envFrom` for `SYNC_API_KEY` (rendered as a plain env value — prefer the Secret) |
+| `syncAPIKey` | `""` | Alternative to `envFrom` for `SYNC_API_KEY` (rendered as a plain env value — prefer the Secret). When empty, the `SYNC_API_KEY` env var is not rendered at all, so the key can arrive via `envFrom` (e.g. an ESO-managed Secret sourced from SSM) |
 | `zitadelKey.*` | — | Mounts the MachineUser key Secret and sets `ZITADEL_KEY_FILE` — the alternative to delivering `ZITADEL_KEY_JSON` via `envFrom` |
 | `cronJob.enabled` / `cronJob.schedule` | `true` / `*/15 * * * *` | Batch reconciliation Job (`sync` subcommand, `concurrencyPolicy: Forbid`); inherits `env`, `envFrom`, config mount, nodeSelector/tolerations/affinity |
 | `replicaCount` | `1` | The service is stateless (per-user locks are best-effort per replica; batch `/sync` remains the reconciliation authority) |
