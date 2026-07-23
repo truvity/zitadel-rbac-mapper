@@ -4,6 +4,13 @@ All notable changes to zitadel-rbac-mapper are documented here.
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-07-23
+
+### Changed
+- `google.golang.org/grpc` v1.82.1 (via renovate, security): clears the open xDS RBAC / HTTP2 dependabot advisory — govulncheck confirms our code never called the vulnerable paths
+- Chart: documented that an empty `syncAPIKey` (the default) omits the `SYNC_API_KEY` env var from the Deployment and CronJob, so the key can be delivered via `envFrom` instead (e.g. an ESO-managed Secret sourced from SSM); `values.yaml` comments and the Kubernetes install doc now spell this out. Behavior when `syncAPIKey` is set is unchanged
+- Chart version now tracks the app release (0.2.0 → 0.16.1)
+
 ## [0.16.0] — 2026-07-22
 
 ### Changed — **BREAKING: v2 org-aware router**
