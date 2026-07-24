@@ -11,7 +11,7 @@ require (
 	github.com/samber/slog-fiber v1.22.2
 	github.com/sony/gobreaker/v2 v2.4.0
 	github.com/zalando/go-keyring v0.2.8
-	github.com/zitadel/oidc/v3 v3.47.9
+	github.com/zitadel/oidc/v3 v3.48.0
 	github.com/zitadel/zitadel-go/v3 v3.29.2
 	google.golang.org/grpc v1.82.1
 	gopkg.in/yaml.v3 v3.0.1
