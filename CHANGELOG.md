@@ -4,6 +4,8 @@ All notable changes to zitadel-rbac-mapper are documented here.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-07-24
+
 ### Added
 - **Role claims** (per-org `appendRoleClaims`, default false): the `groups` claim can now additionally carry `{projectName}:{roleKey}` entries for the user's Zitadel grants — the verified payload's `user_grants` unioned with the freshly computed desired grants (rules → catalog pattern expansion; project names resolved via the role catalog, entries without a resolvable name skipped), deduplicated and sorted alongside the group emails. Lets Kubernetes ClusterRoleBindings / ArgoCD RBAC bind role keys instead of Google group emails; with the flag off the claim is byte-identical to previous releases (parallel-run safety). Enrichment log lines gain `role_entries_count`; the claim-size histograms account for the full claim list
 
