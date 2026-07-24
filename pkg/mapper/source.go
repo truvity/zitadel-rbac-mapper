@@ -80,6 +80,7 @@ type Settings struct {
 //	orgs:
 //	  "376393772658861254":
 //	    name: "Truvity B.V."
+//	    appendRoleClaims: false
 //	    resolver:
 //	      url: "http://google-group-sync.zitadel-rbac-mapper.svc:8080"
 //	      timeout: 5s
@@ -164,6 +165,13 @@ type OrgConfig struct {
 
 	// Rules map directory groups to desired grants.
 	Rules []Rule `yaml:"rules"`
+
+	// AppendRoleClaims, when true, appends "{projectName}:{roleKey}" entries
+	// for the user's Zitadel grants (verified payload user_grants + freshly
+	// computed desired grants) to the same `groups` claim, alongside the
+	// resolved directory group emails. Default false: the claim carries group
+	// emails only (byte-identical to previous releases — parallel-run safety).
+	AppendRoleClaims bool `yaml:"appendRoleClaims"`
 }
 
 // ResolverConfig describes the per-org groups resolver endpoint and its

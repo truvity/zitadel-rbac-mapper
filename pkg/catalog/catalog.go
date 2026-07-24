@@ -38,12 +38,18 @@ const listPageSize = 100
 type API interface {
 	ListGrantedProjects(ctx context.Context, in *management.ListGrantedProjectsRequest, opts ...grpc.CallOption) (*management.ListGrantedProjectsResponse, error)
 	ListProjectRoles(ctx context.Context, in *management.ListProjectRolesRequest, opts ...grpc.CallOption) (*management.ListProjectRolesResponse, error)
+	GetProjectByID(ctx context.Context, in *management.GetProjectByIDRequest, opts ...grpc.CallOption) (*management.GetProjectByIDResponse, error)
 }
 
 // ProjectInfo describes how an org can grant a project.
 type ProjectInfo struct {
 	// ProjectID is the Zitadel project ID.
 	ProjectID string
+
+	// Name is the human-readable project name (role-claims encoding). May be
+	// empty when the name lookup failed — callers that need a name must skip
+	// such projects rather than fall back to the ID.
+	Name string
 
 	// ProjectGrantID is non-empty when the project is owned by another org
 	// and granted to this org via a ProjectGrant. UserGrants for such
@@ -82,6 +88,7 @@ type orgEntry struct {
 type ownedEntry struct {
 	fetchedAt time.Time
 	roles     []string
+	name      string
 }
 
 // New creates a Catalog. ttl is called per lookup, so a live config source
@@ -153,13 +160,13 @@ func (c *Catalog) Project(ctx context.Context, orgID, projectID string) (Project
 				slog.Any("error", err),
 			)
 		} else {
-			owned = &ownedEntry{fetchedAt: c.now(), roles: roles}
+			owned = &ownedEntry{fetchedAt: c.now(), roles: roles, name: c.fetchOwnedName(ctx, orgID, projectID)}
 			entry.owned[projectID] = owned
 			c.observeRefresh(orgID, "success")
 		}
 	}
 
-	return ProjectInfo{ProjectID: projectID, Roles: owned.roles}, nil
+	return ProjectInfo{ProjectID: projectID, Name: owned.name, Roles: owned.roles}, nil
 }
 
 // fetchGranted lists the projects granted to orgID via ProjectGrants.
@@ -180,6 +187,7 @@ func (c *Catalog) fetchGranted(ctx context.Context, orgID string) (map[string]Pr
 		for _, gp := range resp.GetResult() {
 			granted[gp.GetProjectId()] = ProjectInfo{
 				ProjectID:      gp.GetProjectId(),
+				Name:           gp.GetProjectName(),
 				ProjectGrantID: gp.GetGrantId(),
 				Roles:          gp.GetGrantedRoleKeys(),
 			}
@@ -193,6 +201,26 @@ func (c *Catalog) fetchGranted(ctx context.Context, orgID string) (map[string]Pr
 	}
 
 	return granted, nil
+}
+
+// fetchOwnedName resolves the name of a project owned by orgID. Best-effort:
+// a failure degrades to an empty name (role-claims entries for the project are
+// skipped) without failing the catalog lookup — roles stay usable.
+func (c *Catalog) fetchOwnedName(ctx context.Context, orgID, projectID string) string {
+	orgCtx := middleware.SetOrgID(ctx, orgID)
+
+	resp, err := c.api.GetProjectByID(orgCtx, &management.GetProjectByIDRequest{Id: projectID})
+	if err != nil {
+		c.logger.WarnContext(ctx, "project name lookup failed, role-claims entries for this project will be skipped",
+			slog.String("org_id", orgID),
+			slog.String("project_id", projectID),
+			slog.Any("error", err),
+		)
+
+		return ""
+	}
+
+	return resp.GetProject().GetName()
 }
 
 // fetchOwnedRoles lists the role keys of a project owned by orgID.

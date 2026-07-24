@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"strings"
 
 	"github.com/gofiber/fiber/v3"
@@ -17,9 +18,19 @@ import (
 type (
 	// zitadelFunctionPayload is the structure Zitadel sends for preuserinfo/preaccesstoken.
 	zitadelFunctionPayload struct {
-		Function string      `json:"function"`
-		User     zitadelUser `json:"user"`
-		Org      *zitadelOrg `json:"org,omitempty"`
+		Function   string             `json:"function"`
+		User       zitadelUser        `json:"user"`
+		Org        *zitadelOrg        `json:"org,omitempty"`
+		UserGrants []zitadelUserGrant `json:"user_grants,omitempty"`
+	}
+
+	// zitadelUserGrant is one element of the payload's user_grants array.
+	// Only the fields needed for role claims are parsed (the payload also
+	// carries projectGrantId, userGrantResourceOwner, ... — ignored).
+	zitadelUserGrant struct {
+		ProjectID   string   `json:"projectId"`
+		ProjectName string   `json:"projectName"`
+		Roles       []string `json:"roles"`
 	}
 
 	zitadelUser struct {
@@ -69,7 +80,10 @@ const orgLabelUnknown = "unknown"
 //     + role patterns expanded against the role catalog)
 //  5. Syncs UserGrants in Zitadel (idempotent add/update/remove;
 //     ProjectGrant-aware for projects granted from other orgs)
-//  6. Returns append_claims with a "groups" claim containing the group emails
+//  6. Returns append_claims with a "groups" claim containing the group emails.
+//     When the org opts in via appendRoleClaims, the same claim additionally
+//     carries "{projectName}:{roleKey}" entries for the user's grants (payload
+//     user_grants ∪ freshly computed desired grants, deduplicated, sorted)
 func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 	logger := deps.Logger
 
@@ -210,6 +224,27 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 			userLocks.Unlock(userID)
 		}
 
+		// Role claims (opt-in per org): the groups claim additionally carries
+		// "{projectName}:{roleKey}" entries — from the verified payload's
+		// user_grants AND from the freshly computed desired grants (rules →
+		// catalog pattern expansion, exactly mirroring grant sync). The
+		// computed side covers first login, where the payload's user_grants
+		// don't yet include the grants the sync above just created. With the
+		// flag off (default) the claim stays byte-identical to previous
+		// releases: group emails only (parallel-run safety).
+		claimValues := groups
+		roleEntriesCount := 0
+
+		if org.AppendRoleClaims {
+			entries := payloadRoleEntries(payload.UserGrants)
+			entries = append(entries, reconcile.RoleEntries(
+				ctx, logger, deps.Catalog, orgID, org.Rules, groups,
+				deps.Source.Settings().ProtectedRoles,
+			)...)
+
+			claimValues, roleEntriesCount = mergeClaimEntries(groups, entries)
+		}
+
 		// One structured line per enrichment request: WARN on zero groups so
 		// "empty claims" responses are diagnosable from logs. Identified by
 		// user_id; the email appears only in the debug-level line above.
@@ -219,6 +254,7 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 				slog.String("user_id", userID),
 				slog.Int("groups_count", 0),
 				slog.Int("grants_count", 0),
+				slog.Int("role_entries_count", roleEntriesCount),
 			)
 			deps.observeWebhook(orgID, metrics.OutcomeEmpty)
 		} else {
@@ -227,18 +263,73 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 				slog.String("user_id", userID),
 				slog.Int("groups_count", len(groups)),
 				slog.Int("grants_count", grantsCount),
+				slog.Int("role_entries_count", roleEntriesCount),
 			)
 			deps.observeWebhook(orgID, metrics.OutcomeEnriched)
 		}
 
-		observeClaimSize(deps, orgID, groups)
+		observeClaimSize(deps, orgID, claimValues)
 
 		return c.Status(fiber.StatusOK).JSON(setClaimsResponse{
 			AppendClaims: []*appendClaim{
-				{Key: "groups", Value: groups},
+				{Key: "groups", Value: claimValues},
 			},
 		})
 	}
+}
+
+// payloadRoleEntries flattens the verified payload's user_grants into
+// "{projectName}:{roleKey}" entries. Elements without a project name or
+// without roles are skipped.
+func payloadRoleEntries(grants []zitadelUserGrant) []string {
+	var entries []string
+
+	for _, g := range grants {
+		if g.ProjectName == "" {
+			continue
+		}
+
+		for _, role := range g.Roles {
+			if role == "" {
+				continue
+			}
+
+			entries = append(entries, g.ProjectName+":"+role)
+		}
+	}
+
+	return entries
+}
+
+// mergeClaimEntries unions group emails with role-claim entries into a
+// deduplicated, sorted claim list. added is the number of distinct role
+// entries added on top of the groups (role_entries_count).
+func mergeClaimEntries(groups, entries []string) (merged []string, added int) {
+	seen := make(map[string]struct{}, len(groups)+len(entries))
+	merged = make([]string, 0, len(groups)+len(entries))
+
+	for _, g := range groups {
+		if _, ok := seen[g]; ok {
+			continue
+		}
+
+		seen[g] = struct{}{}
+		merged = append(merged, g)
+	}
+
+	for _, e := range entries {
+		if _, ok := seen[e]; ok {
+			continue
+		}
+
+		seen[e] = struct{}{}
+		merged = append(merged, e)
+		added++
+	}
+
+	sort.Strings(merged)
+
+	return merged, added
 }
 
 // lookupOrg resolves the org config; an empty orgID is always unconfigured.
