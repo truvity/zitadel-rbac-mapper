@@ -26,6 +26,7 @@ orgs:
             rolePatterns: ["dmsplus:*"]
   "org-2":
     name: "Digimarc"
+    appendRoleClaims: true
     resolver:
       url: "http://egs.svc:8080"
     rules:
@@ -69,6 +70,22 @@ func TestParseConfig_Valid(t *testing.T) {
 
 	if len(org1.Rules) != 1 || org1.Rules[0].Grants[0].RolePatterns[0] != "dmsplus:*" {
 		t.Errorf("unexpected rules: %+v", org1.Rules)
+	}
+}
+
+func TestParseConfig_AppendRoleClaims(t *testing.T) {
+	cfg, err := ParseConfig([]byte(validConfig))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// org-1 does not set the flag — defaults to false (parallel-run safety).
+	if cfg.Orgs["org-1"].AppendRoleClaims {
+		t.Error("appendRoleClaims must default to false")
+	}
+
+	if !cfg.Orgs["org-2"].AppendRoleClaims {
+		t.Error("appendRoleClaims: true not parsed for org-2")
 	}
 }
 

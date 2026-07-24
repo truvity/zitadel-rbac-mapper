@@ -9,13 +9,19 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gofiber/fiber/v3"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"google.golang.org/grpc"
 
+	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/management"
+	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/project"
+
+	"github.com/truvity/zitadel-rbac-mapper/pkg/catalog"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/mapper"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/metrics"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/resolver"
@@ -368,3 +374,228 @@ func TestWebhook_ResolverError_EmptyGroups(t *testing.T) {
 }
 
 var errRefresh = errors.New("refresh failed")
+
+// ---------------------------------------------------------------------------
+// Role claims (appendRoleClaims)
+// ---------------------------------------------------------------------------
+
+// stubCatalogAPI implements catalog.API for role-claims tests: granted
+// projects (with names) and owned projects (roles + optional name).
+type stubCatalogAPI struct {
+	granted map[string]*project.GrantedProject // projectID → granted (incl. name)
+	roles   map[string][]string                // projectID → owned role keys
+	names   map[string]string                  // projectID → owned project name
+}
+
+func (s *stubCatalogAPI) ListGrantedProjects(_ context.Context, _ *management.ListGrantedProjectsRequest, _ ...grpc.CallOption) (*management.ListGrantedProjectsResponse, error) {
+	resp := &management.ListGrantedProjectsResponse{}
+	for _, gp := range s.granted {
+		resp.Result = append(resp.Result, gp)
+	}
+
+	return resp, nil
+}
+
+func (s *stubCatalogAPI) ListProjectRoles(_ context.Context, req *management.ListProjectRolesRequest, _ ...grpc.CallOption) (*management.ListProjectRolesResponse, error) {
+	roles, ok := s.roles[req.GetProjectId()]
+	if !ok {
+		return nil, errors.New("project not found")
+	}
+
+	resp := &management.ListProjectRolesResponse{}
+	for _, key := range roles {
+		resp.Result = append(resp.Result, &project.Role{Key: key})
+	}
+
+	return resp, nil
+}
+
+func (s *stubCatalogAPI) GetProjectByID(_ context.Context, req *management.GetProjectByIDRequest, _ ...grpc.CallOption) (*management.GetProjectByIDResponse, error) {
+	name, ok := s.names[req.GetId()]
+	if !ok {
+		return nil, errors.New("project not found")
+	}
+
+	return &management.GetProjectByIDResponse{
+		Project: &project.Project{Id: req.GetId(), Name: name},
+	}, nil
+}
+
+// withCatalog attaches a role catalog backed by the stub API to the deps.
+func withCatalog(deps *server.Deps, api catalog.API) {
+	deps.Catalog = catalog.New(deps.Logger, api, func() time.Duration { return time.Minute }, deps.Metrics)
+}
+
+// roleClaimsPayload builds a webhook payload with a user_grants array.
+func roleClaimsPayload(function, email, orgID, userGrants string) string {
+	payload := `{"function":"` + function + `","user":{"id":"u1","username":"` + email + `","human":{"email":"` + email + `"}}`
+	if orgID != "" {
+		payload += `,"org":{"id":"` + orgID + `"}`
+	}
+
+	if userGrants != "" {
+		payload += `,"user_grants":` + userGrants
+	}
+
+	return payload + `}`
+}
+
+func TestWebhook_RoleClaimsOff_ClaimsUnchanged(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		// Deliberately not in sorted order: with the flag off the claim must
+		// pass the resolver's answer through unmodified (not even re-sorted).
+		"user1@example.com": {"zzz@example.com", "admins@example.com"},
+	})
+
+	rules := []mapper.Rule{
+		{Group: "admins@example.com", Grants: []mapper.Grant{{Project: "p-plat", Roles: []string{"cluster:admin"}}}},
+	}
+
+	var logBuf bytes.Buffer
+
+	deps, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"org1": orgConfig(backend.URL, rules), // appendRoleClaims not set → false
+	}, &logBuf)
+	withCatalog(deps, &stubCatalogAPI{
+		granted: map[string]*project.GrantedProject{
+			"p-plat": {ProjectId: "p-plat", ProjectName: "platform", GrantId: "g1", GrantedRoleKeys: []string{"cluster:admin"}},
+		},
+	})
+
+	grants := `[{"projectId":"p-plat","projectName":"platform","roles":["cluster:admin"]}]`
+	resp := postWebhook(t, app, roleClaimsPayload("function/preuserinfo", "user1@example.com", "org1", grants))
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	got := decodeGroupsClaim(t, resp.Body)
+
+	want := []string{"zzz@example.com", "admins@example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("flag off must leave the claim byte-identical (emails only, resolver order); got %v, want %v", got, want)
+	}
+}
+
+func TestWebhook_RoleClaimsOn_PayloadGrantsAppended(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		"user1@example.com": {"admins@example.com"},
+	})
+
+	var logBuf bytes.Buffer
+
+	org := orgConfig(backend.URL, nil)
+	org.AppendRoleClaims = true
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{"org1": org}, &logBuf)
+
+	// Elements with an empty projectName or no roles must be skipped.
+	grants := `[
+		{"projectId":"p1","projectName":"dmsplus","roles":["viewer","deployer"]},
+		{"projectId":"p2","projectName":"","roles":["hidden:role"]},
+		{"projectId":"p3","projectName":"noroles","roles":[]}
+	]`
+	resp := postWebhook(t, app, roleClaimsPayload("function/preuserinfo", "user1@example.com", "org1", grants))
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	got := decodeGroupsClaim(t, resp.Body)
+
+	want := []string{"admins@example.com", "dmsplus:deployer", "dmsplus:viewer"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got claim %v, want %v (emails + flattened payload grants, deduped, sorted)", got, want)
+	}
+
+	if !strings.Contains(logBuf.String(), `"role_entries_count":2`) {
+		t.Errorf("expected role_entries_count=2 in enrichment log, got: %s", logBuf.String())
+	}
+}
+
+func TestWebhook_RoleClaimsOn_ComputedGrantsViaCatalog(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		"user1@example.com": {"admins@example.com"},
+	})
+
+	rules := []mapper.Rule{
+		{Group: "admins@example.com", Grants: []mapper.Grant{
+			// Project name resolvable via the catalog (granted project):
+			// exact role + pattern expansion against the catalog roles.
+			{Project: "p-plat", Roles: []string{"cluster:admin"}, RolePatterns: []string{"app:*"}},
+			// Owned project with NO resolvable name: computed entries skipped
+			// (never an ID-based string).
+			{Project: "p-unknown", Roles: []string{"ops:admin"}},
+		}},
+	}
+
+	var logBuf bytes.Buffer
+
+	org := orgConfig(backend.URL, rules)
+	org.AppendRoleClaims = true
+
+	deps, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{"org1": org}, &logBuf)
+	withCatalog(deps, &stubCatalogAPI{
+		granted: map[string]*project.GrantedProject{
+			"p-plat": {ProjectId: "p-plat", ProjectName: "platform", GrantId: "g1", GrantedRoleKeys: []string{"app:deployer", "app:viewer"}},
+		},
+		roles: map[string][]string{"p-unknown": {"ops:admin"}},
+		// no names entry for p-unknown → name lookup fails → skipped
+	})
+
+	resp := postWebhook(t, app, roleClaimsPayload("function/preuserinfo", "user1@example.com", "org1", ""))
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	got := decodeGroupsClaim(t, resp.Body)
+
+	want := []string{"admins@example.com", "platform:app:deployer", "platform:app:viewer", "platform:cluster:admin"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got claim %v, want %v (computed grants with catalog-resolved name)", got, want)
+	}
+
+	for _, entry := range got {
+		if strings.Contains(entry, "p-unknown") {
+			t.Errorf("claim must never contain an ID-based entry, got %q", entry)
+		}
+	}
+}
+
+func TestWebhook_RoleClaimsOn_DedupPayloadAndComputed(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		"user1@example.com": {"admins@example.com"},
+	})
+
+	rules := []mapper.Rule{
+		{Group: "admins@example.com", Grants: []mapper.Grant{{Project: "p-plat", Roles: []string{"cluster:admin"}}}},
+	}
+
+	var logBuf bytes.Buffer
+
+	org := orgConfig(backend.URL, rules)
+	org.AppendRoleClaims = true
+
+	deps, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{"org1": org}, &logBuf)
+	withCatalog(deps, &stubCatalogAPI{
+		granted: map[string]*project.GrantedProject{
+			"p-plat": {ProjectId: "p-plat", ProjectName: "platform", GrantId: "g1", GrantedRoleKeys: []string{"cluster:admin"}},
+		},
+	})
+
+	// The payload already carries the same grant the rules compute.
+	grants := `[{"projectId":"p-plat","projectName":"platform","roles":["cluster:admin"]}]`
+	resp := postWebhook(t, app, roleClaimsPayload("function/preuserinfo", "user1@example.com", "org1", grants))
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	got := decodeGroupsClaim(t, resp.Body)
+
+	want := []string{"admins@example.com", "platform:cluster:admin"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("payload and computed grants must dedupe to one entry; got %v, want %v", got, want)
+	}
+}

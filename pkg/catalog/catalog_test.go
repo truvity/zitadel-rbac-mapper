@@ -20,6 +20,7 @@ type stubAPI struct {
 
 	granted map[string]*project.GrantedProject // projectID → granted
 	roles   map[string][]string                // projectID → owned role keys
+	names   map[string]string                  // projectID → owned project name
 	fail    atomic.Bool
 }
 
@@ -56,6 +57,21 @@ func (s *stubAPI) ListProjectRoles(_ context.Context, req *management.ListProjec
 	}
 
 	return resp, nil
+}
+
+func (s *stubAPI) GetProjectByID(_ context.Context, req *management.GetProjectByIDRequest, _ ...grpc.CallOption) (*management.GetProjectByIDResponse, error) {
+	if s.fail.Load() {
+		return nil, errors.New("stub failure")
+	}
+
+	name, ok := s.names[req.GetId()]
+	if !ok {
+		return nil, errors.New("project not found")
+	}
+
+	return &management.GetProjectByIDResponse{
+		Project: &project.Project{Id: req.GetId(), Name: name},
+	}, nil
 }
 
 func newTestCatalog(api API, ttl time.Duration) (*Catalog, *time.Time) {
@@ -107,6 +123,56 @@ func TestCatalog_GrantedProject(t *testing.T) {
 
 	if len(info.Roles) != 1 || info.Roles[0] != "dmsplus:deployer" {
 		t.Errorf("got roles %v", info.Roles)
+	}
+}
+
+func TestCatalog_ProjectNames(t *testing.T) {
+	api := &stubAPI{
+		granted: map[string]*project.GrantedProject{
+			"p-platform": {
+				ProjectId:       "p-platform",
+				ProjectName:     "platform",
+				GrantId:         "grant-42",
+				GrantedRoleKeys: []string{"dmsplus:deployer"},
+			},
+		},
+		roles: map[string][]string{"p1": {"admin"}, "p2": {"viewer"}},
+		names: map[string]string{"p1": "internal"},
+	}
+	c, _ := newTestCatalog(api, time.Minute)
+
+	// Granted project: name comes from ListGrantedProjects.
+	info, err := c.Project(context.Background(), "org-1", "p-platform")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if info.Name != "platform" {
+		t.Errorf("granted project name = %q, want platform", info.Name)
+	}
+
+	// Owned project: name comes from GetProjectByID.
+	info, err = c.Project(context.Background(), "org-1", "p1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if info.Name != "internal" {
+		t.Errorf("owned project name = %q, want internal", info.Name)
+	}
+
+	// Owned project with a failing name lookup: degrade to empty name, keep roles.
+	info, err = c.Project(context.Background(), "org-1", "p2")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if info.Name != "" {
+		t.Errorf("expected empty name on failed lookup, got %q", info.Name)
+	}
+
+	if len(info.Roles) != 1 || info.Roles[0] != "viewer" {
+		t.Errorf("roles must survive a failed name lookup, got %v", info.Roles)
 	}
 }
 

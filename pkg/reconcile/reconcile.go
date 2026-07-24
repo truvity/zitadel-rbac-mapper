@@ -103,6 +103,54 @@ func Desired(
 	return desired
 }
 
+// RoleEntries computes the "{projectName}:{roleKey}" role-claim entries for
+// the user's freshly computed desired grants (rules → pattern expansion,
+// exactly mirroring Desired). Rules reference projects by ID; the human
+// project NAME comes from the role catalog. Projects whose name is unknown
+// (nil catalog, catalog lookup failure, or empty name) are skipped entirely —
+// an ID-based string must never be emitted into the claim.
+func RoleEntries(
+	ctx context.Context,
+	logger *slog.Logger,
+	cat *catalog.Catalog,
+	orgID string,
+	rules []mapper.Rule,
+	groups []string,
+	protectedRoles []string,
+) []string {
+	if cat == nil {
+		return nil
+	}
+
+	mapped := mapper.NewMapper(rules).MapGroups(groups)
+
+	var entries []string
+
+	for _, mg := range mapped {
+		info, err := cat.Project(ctx, orgID, mg.Project)
+		if err != nil {
+			logger.WarnContext(ctx, "role catalog lookup failed, skipping role-claim entries for project",
+				slog.String("org_id", orgID),
+				slog.String("project_id", mg.Project),
+				slog.Any("error", err),
+			)
+
+			continue
+		}
+
+		if info.Name == "" {
+			// No name available — skip rather than emit an ID-based string.
+			continue
+		}
+
+		for _, role := range mapper.ExpandRoles(mg, info.Roles, protectedRoles) {
+			entries = append(entries, info.Name+":"+role)
+		}
+	}
+
+	return entries
+}
+
 // SyncUser resolves the desired grants for a single user and reconciles them.
 // Callers must hold the user lock.
 func SyncUser(

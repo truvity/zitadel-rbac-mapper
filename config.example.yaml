@@ -44,6 +44,15 @@ orgs:
     # Human-readable name, used in logs only.
     name: "Truvity B.V. (TP)"
 
+    # Append "{projectName}:{roleKey}" entries for the user's Zitadel grants
+    # (the verified payload's user_grants PLUS the freshly computed desired
+    # grants) to the same `groups` claim, alongside the group emails —
+    # deduplicated and sorted. Lets Kubernetes ClusterRoleBindings / ArgoCD
+    # RBAC bind role keys instead of Google group emails. Optional, default
+    # false: the claim carries group emails only (identical to previous
+    # releases — safe for parallel-run rollout).
+    appendRoleClaims: false
+
     # The directory-groups resolver for this org. google-group-sync (Google
     # Workspace) and entra-group-sync (Microsoft Entra) share the same HTTP
     # contract: GET /users/{email}/groups → {"groups": ["..."]}.

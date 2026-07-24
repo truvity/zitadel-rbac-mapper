@@ -47,6 +47,7 @@ protectedRoles: ["cluster:admin"]
 orgs:
   "<zitadel-org-id>":
     name: "Company name"
+    appendRoleClaims: false
     resolver:
       url: "http://google-group-sync.zitadel-rbac-mapper.svc:8080"
       timeout: 5s
@@ -78,6 +79,7 @@ orgs:
 | Field | Type | Default | Constraints / semantics |
 | --- | --- | --- | --- |
 | `name` | string | `""` | Human-readable, used in logs only. |
+| `appendRoleClaims` | bool | `false` | Append `{projectName}:{roleKey}` entries for the user's Zitadel grants to the same `groups` claim, alongside the group emails. The entries are the union of the verified payload's `user_grants` and the freshly computed desired grants (rules → catalog pattern expansion, project names resolved via the role catalog — entries whose project name cannot be resolved are skipped, never emitted as IDs), deduplicated and sorted. With the flag off the claim is byte-identical to previous releases (emails only) — safe for a per-org parallel-run rollout. |
 | `resolver` | object | — | The org's directory-groups resolver (below). |
 | `rules` | list | `[]` | Group → grant rules (below). An org with an empty rule list is still "configured": logins get the groups claim, but **grant sync is skipped entirely** — a zero-rules org claims no grant authority, so existing grants are never touched (both the login path and batch sync skip such orgs). |
 

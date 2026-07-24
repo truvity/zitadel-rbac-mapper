@@ -83,6 +83,7 @@ type fakeZitadel struct {
 	owned   map[string]map[string][]string        // orgID → projectID → role keys
 	granted map[string]map[string]*grantedProject // orgID → projectID → grant info
 	users   map[string][]fakeUser                 // orgID → users
+	names   map[string]string                     // projectID → project name
 
 	addCalls         atomic.Int64
 	updateCalls      atomic.Int64
@@ -169,6 +170,7 @@ func newFakeZitadel(t *testing.T) *fakeZitadel {
 		owned:   make(map[string]map[string][]string),
 		granted: make(map[string]map[string]*grantedProject),
 		users:   make(map[string][]fakeUser),
+		names:   make(map[string]string),
 	}
 
 	// Signing key + JWKS endpoint (rotatable, see rotateKey).
@@ -242,6 +244,16 @@ func (fz *fakeZitadel) setGrantedProject(orgID, projectID, grantID string, roles
 	}
 
 	fz.granted[orgID][projectID] = &grantedProject{grantID: grantID, roles: roles}
+}
+
+// setProjectName registers a human-readable name for a project — served via
+// ListGrantedProjects (granted projects) and GetProjectByID (owned projects),
+// as the role catalog resolves names for role claims.
+func (fz *fakeZitadel) setProjectName(projectID, name string) {
+	fz.mu.Lock()
+	defer fz.mu.Unlock()
+
+	fz.names[projectID] = name
 }
 
 // seedGrant inserts a pre-existing UserGrant directly into the store,
@@ -496,12 +508,29 @@ func (fz *fakeZitadel) ListGrantedProjects(ctx context.Context, _ *management.Li
 		resp.Result = append(resp.Result, &project.GrantedProject{
 			GrantId:         gp.grantID,
 			ProjectId:       projectID,
+			ProjectName:     fz.names[projectID],
 			GrantedRoleKeys: gp.roles,
 			GrantedOrgId:    org,
 		})
 	}
 
 	return resp, nil
+}
+
+// GetProjectByID serves project metadata (the name) — used by the role
+// catalog for owned projects when building role-claim entries.
+func (fz *fakeZitadel) GetProjectByID(_ context.Context, req *management.GetProjectByIDRequest) (*management.GetProjectByIDResponse, error) {
+	fz.mu.Lock()
+	defer fz.mu.Unlock()
+
+	name, ok := fz.names[req.GetId()]
+	if !ok {
+		return nil, status.Errorf(codes.NotFound, "project %s not found", req.GetId())
+	}
+
+	return &management.GetProjectByIDResponse{
+		Project: &project.Project{Id: req.GetId(), Name: name},
+	}, nil
 }
 
 func (fz *fakeZitadel) ListUsers(ctx context.Context, _ *management.ListUsersRequest) (*management.ListUsersResponse, error) {
