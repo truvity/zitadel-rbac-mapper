@@ -4,6 +4,11 @@ All notable changes to zitadel-rbac-mapper are documented here.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-07-25
+
+### Added
+- **`roleClaimsOnly`** (per-org, default false, requires `appendRoleClaims`): the role entries **replace** the directory group emails in the `groups` claim instead of joining them — the claim becomes pure authorization vocabulary. Completes the migration path emails → emails+roles → roles only. Directory groups remain the mapper's input in every mode (they match the rules and drive grant sync); the flags control only what downstream systems receive. Config load **rejects** `roleClaimsOnly` without `appendRoleClaims`: there would be no entries to emit, so the claim would be empty and every consumer would silently lose authorization. Enable only after auditing every consumer of directory groups — Kubernetes RBAC subjects, ArgoCD `policy.csv` **and** AppProject roles, gateway claim rules — because a missed consumer fails silently rather than loudly
+
 ## [0.17.0] — 2026-07-24
 
 ### Added

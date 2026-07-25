@@ -172,6 +172,22 @@ type OrgConfig struct {
 	// resolved directory group emails. Default false: the claim carries group
 	// emails only (byte-identical to previous releases — parallel-run safety).
 	AppendRoleClaims bool `yaml:"appendRoleClaims"`
+
+	// RoleClaimsOnly, when true, REPLACES the directory group emails in the
+	// `groups` claim with the role entries instead of appending to them —
+	// the claim becomes pure authorization vocabulary.
+	//
+	// Requires AppendRoleClaims (there would be nothing to emit otherwise);
+	// the config loader rejects the combination roleClaimsOnly without
+	// appendRoleClaims.
+	//
+	// Enable only once NOTHING binds directory groups: k8s RBAC subjects,
+	// ArgoCD's policy.csv AND its AppProject roles, gateway claim rules.
+	// Auditing those is what the emails' removal waits on (a missed
+	// consumer fails silently — the user simply loses access). Directory
+	// groups remain the mapper's INPUT either way; this only controls what
+	// downstream systems see.
+	RoleClaimsOnly bool `yaml:"roleClaimsOnly"`
 }
 
 // ResolverConfig describes the per-org groups resolver endpoint and its
@@ -270,6 +286,13 @@ func (c *Config) validate() error {
 
 		if org.Resolver.MaxConcurrency < 0 {
 			return fmt.Errorf("orgs[%s]: resolver.maxConcurrency must be >= 0", orgID)
+		}
+
+		// roleClaimsOnly REPLACES group emails with role entries; without
+		// appendRoleClaims there are no role entries, so the claim would be
+		// empty and every consumer would lose authorization silently.
+		if org.RoleClaimsOnly && !org.AppendRoleClaims {
+			return fmt.Errorf("orgs[%s]: roleClaimsOnly requires appendRoleClaims (otherwise the groups claim would be empty)", orgID)
 		}
 
 		for j, rule := range org.Rules {

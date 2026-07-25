@@ -39,18 +39,28 @@ another company's logins; grant writes are idempotent deltas, and the batch
 
 The mapper appends a single `groups` claim to the token:
 
-- **Always**: the user's resolved directory group emails, passed through from
+- **Default**: the user's resolved directory group emails, passed through from
   the org's resolver unmodified.
-- **Opt-in per org** (`appendRoleClaims: true`): additionally,
-  `{projectName}:{roleKey}` entries for the user's Zitadel grants — both the
-  grants in the verified payload's `user_grants` and the desired grants the
-  mapper just computed from the rules (so the very first login already carries
-  the roles the sync is creating). The whole list is deduplicated and sorted.
-  Downstream Kubernetes ClusterRoleBindings and ArgoCD RBAC CSVs bind these
-  `{projectName}:{roleKey}` strings instead of group emails.
+- **`appendRoleClaims: true`**: additionally, `{projectName}:{roleKey}` entries
+  for the user's Zitadel grants — both the grants in the verified payload's
+  `user_grants` and the desired grants the mapper just computed from the rules
+  (so the very first login already carries the roles the sync is creating). The
+  whole list is deduplicated and sorted. Downstream Kubernetes
+  ClusterRoleBindings and ArgoCD RBAC bind these `{projectName}:{roleKey}`
+  strings instead of group emails.
+- **`roleClaimsOnly: true`** (requires `appendRoleClaims`): the role entries
+  **replace** the group emails rather than joining them — the claim becomes
+  pure authorization vocabulary. Enable only once nothing downstream binds
+  directory groups: Kubernetes RBAC subjects, ArgoCD's `policy.csv` **and** its
+  AppProject roles, gateway claim rules. A missed consumer fails silently (the
+  user simply loses access), so audit before flipping.
 
-With the flag off (the default) the claim is identical to previous releases —
-emails only — so orgs can be migrated one at a time in a parallel run.
+Directory groups are the mapper's **input** in every mode — they match the
+rules and drive grant sync. These flags control only what downstream systems
+receive.
+
+The three modes form a migration path: emails only → emails + roles (parallel
+run, one org at a time) → roles only.
 
 ## Quickstart (Kubernetes)
 

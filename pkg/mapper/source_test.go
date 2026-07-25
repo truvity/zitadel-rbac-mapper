@@ -1,6 +1,7 @@
 package mapper
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -184,4 +185,68 @@ func TestParseConfig_JSONWorksToo(t *testing.T) {
 	if cfg.Orgs["o1"].Resolver.Timeout.Std() != time.Second {
 		t.Errorf("got timeout %s, want 1s", cfg.Orgs["o1"].Resolver.Timeout.Std())
 	}
+}
+
+func TestParseConfig_RoleClaimsOnly(t *testing.T) {
+	t.Run("defaults to false", func(t *testing.T) {
+		cfg, err := ParseConfig([]byte(validConfig))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		for orgID, org := range cfg.Orgs {
+			if org.RoleClaimsOnly {
+				t.Errorf("orgs[%s]: roleClaimsOnly must default to false", orgID)
+			}
+		}
+	})
+
+	t.Run("accepted with appendRoleClaims", func(t *testing.T) {
+		cfg, err := ParseConfig([]byte(`
+orgs:
+  org-1:
+    name: Test
+    appendRoleClaims: true
+    roleClaimsOnly: true
+    resolver:
+      url: http://resolver:8080
+    rules:
+      - group: eng@example.com
+        grants:
+          - project: "1"
+            roles: [viewer]
+`))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !cfg.Orgs["org-1"].RoleClaimsOnly {
+			t.Error("roleClaimsOnly: true not parsed")
+		}
+	})
+
+	// Without appendRoleClaims there are no role entries, so the claim would
+	// be empty and every consumer would silently lose authorization.
+	t.Run("rejected without appendRoleClaims", func(t *testing.T) {
+		_, err := ParseConfig([]byte(`
+orgs:
+  org-1:
+    name: Test
+    roleClaimsOnly: true
+    resolver:
+      url: http://resolver:8080
+    rules:
+      - group: eng@example.com
+        grants:
+          - project: "1"
+            roles: [viewer]
+`))
+		if err == nil {
+			t.Fatal("expected an error for roleClaimsOnly without appendRoleClaims")
+		}
+
+		if !strings.Contains(err.Error(), "roleClaimsOnly requires appendRoleClaims") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
 }
