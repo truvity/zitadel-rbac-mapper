@@ -242,7 +242,17 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 				deps.Source.Settings().ProtectedRoles,
 			)...)
 
-			claimValues, roleEntriesCount = mergeClaimEntries(groups, entries)
+			// roleClaimsOnly: the claim becomes pure authorization
+			// vocabulary — role entries replace the directory group emails
+			// rather than sitting alongside them. Directory groups remain
+			// the mapper's INPUT (they produced these entries); this only
+			// changes what downstream systems receive.
+			base := groups
+			if org.RoleClaimsOnly {
+				base = nil
+			}
+
+			claimValues, roleEntriesCount = mergeClaimEntries(base, entries)
 		}
 
 		// One structured line per enrichment request: WARN on zero groups so

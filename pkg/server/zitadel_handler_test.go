@@ -599,3 +599,82 @@ func TestWebhook_RoleClaimsOn_DedupPayloadAndComputed(t *testing.T) {
 		t.Errorf("payload and computed grants must dedupe to one entry; got %v, want %v", got, want)
 	}
 }
+
+// roleClaimsOnly REPLACES the directory group emails with role entries: the
+// claim becomes pure authorization vocabulary. This is the end state of the
+// INF-441 spine migration — nothing downstream binds directory groups any
+// more, so shipping their names in every token is pure leakage.
+func TestWebhook_RoleClaimsOnly_ReplacesEmails(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		"user1@example.com": {"admins@example.com", "eng@example.com"},
+	})
+
+	var logBuf bytes.Buffer
+
+	org := orgConfig(backend.URL, nil)
+	org.AppendRoleClaims = true
+	org.RoleClaimsOnly = true
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{"org1": org}, &logBuf)
+
+	grants := `[{"projectId":"p1","projectName":"cluster-kernel","roles":["cluster:admin","cluster:viewer"]}]`
+	resp := postWebhook(t, app, roleClaimsPayload("function/preuserinfo", "user1@example.com", "org1", grants))
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	got := decodeGroupsClaim(t, resp.Body)
+
+	want := []string{"cluster-kernel:cluster:admin", "cluster-kernel:cluster:viewer"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got claim %v, want %v (role entries ONLY — no directory emails)", got, want)
+	}
+
+	for _, v := range got {
+		if strings.Contains(v, "@") {
+			t.Errorf("claim leaked a directory email: %q", v)
+		}
+	}
+}
+
+// Groups still drive grant computation with roleClaimsOnly on — the flag
+// changes only what the CLAIM carries, never what the mapper reads.
+func TestWebhook_RoleClaimsOnly_GroupsStillDriveGrants(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		"user1@example.com": {"admins@example.com"},
+	})
+
+	rules := []mapper.Rule{
+		{Group: "admins@example.com", Grants: []mapper.Grant{
+			{Project: "p-plat", Roles: []string{"cluster:admin"}},
+		}},
+	}
+
+	var logBuf bytes.Buffer
+
+	org := orgConfig(backend.URL, rules)
+	org.AppendRoleClaims = true
+	org.RoleClaimsOnly = true
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{"org1": org}, &logBuf)
+
+	resp := postWebhook(t, app, roleClaimsPayload("function/preuserinfo", "user1@example.com", "org1", `[]`))
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	// The resolver WAS consulted and its group counted — groups remain the
+	// mapper's input for rule matching and grant sync; only the claim's
+	// contents change.
+	if !strings.Contains(logBuf.String(), `"groups_count":1`) {
+		t.Errorf("expected groups_count=1 (group resolved and used), got: %s", logBuf.String())
+	}
+
+	// ...while the claim itself carries no directory email.
+	for _, v := range decodeGroupsClaim(t, resp.Body) {
+		if strings.Contains(v, "@") {
+			t.Errorf("claim leaked a directory email: %q", v)
+		}
+	}
+}
