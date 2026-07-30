@@ -1,5 +1,12 @@
 replicaCount: 1
 
+# PodDisruptionBudget — enabled automatically when replicaCount >= 2.
+# The webhook sits on the login-enrichment path: with a single replica,
+# every node consolidation is a brief enrichment brown-out. Run 2.
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
 image:
   repository: ghcr.io/truvity/zitadel-rbac-mapper
   tag: ""  # defaults to appVersion

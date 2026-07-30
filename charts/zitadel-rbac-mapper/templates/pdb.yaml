@@ -1,0 +1,13 @@
+{{- if and .Values.podDisruptionBudget.enabled (ge (int .Values.replicaCount) 2) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "zitadel-rbac-mapper.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "zitadel-rbac-mapper.selectorLabels" . | nindent 6 }}
+{{- end }}
