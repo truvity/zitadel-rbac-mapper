@@ -10,6 +10,7 @@ import (
 	"github.com/truvity/zitadel-rbac-mapper/pkg/catalog"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/config"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/grantsync"
+	"github.com/truvity/zitadel-rbac-mapper/pkg/keysource"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/mapper"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/metrics"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/resolver"
@@ -68,6 +69,7 @@ func BuildDeps(ctx context.Context, logger *slog.Logger, cfg *config.Config, opt
 		Domain:  cfg.ZitadelDomain,
 		Port:    cfg.ZitadelPort,
 		KeyJSON: cfg.ZitadelKeyJSON,
+		Keys:    zitadelKeys(logger, cfg),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create grantsync client: %w", err)
@@ -100,7 +102,7 @@ func BuildDeps(ctx context.Context, logger *slog.Logger, cfg *config.Config, opt
 		Logger:    logger,
 		Source:    source,
 		Resolvers: resolver.NewRegistry(logger, m),
-		Catalog:   catalog.New(logger, syncer.Client().ManagementService(), source.RoleCacheTTL, m),
+		Catalog:   catalog.New(logger, syncer.ManagementAPI(), source.RoleCacheTTL, m),
 		Syncer:    syncer,
 		Verifier:  verifier,
 		Metrics:   m,
@@ -131,4 +133,14 @@ func parseLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// zitadelKeys returns a rotation-aware key source for the Secret-mounted
+// key file, or nil to fall back to the static env-injected KeyJSON.
+func zitadelKeys(logger *slog.Logger, cfg *config.Config) keysource.Source {
+	if cfg.ZitadelKeyFile == "" {
+		return nil
+	}
+
+	return keysource.File(logger, cfg.ZitadelKeyFile)
 }

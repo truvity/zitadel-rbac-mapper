@@ -19,8 +19,10 @@ type Config struct {
 
 	// ZitadelKeyJSON is the MachineUser JWT key JSON. Populated from
 	// ZITADEL_KEY_JSON, or read from the file at ZITADEL_KEY_FILE when the
-	// env var is unset (ZITADEL_KEY_JSON wins if both are set).
+	// env var is unset (ZITADEL_KEY_JSON wins if both are set). File mode
+	// retains the path in ZitadelKeyFile for rotation-aware re-reading.
 	ZitadelKeyJSON string
+	ZitadelKeyFile string
 
 	// Sync API key (required).
 	SyncAPIKey string
@@ -54,14 +56,17 @@ func Load() (*Config, error) {
 		LogLevel:       envOrDefault("LOG_LEVEL", "info"),
 	}
 
-	// Key-file fallback (chart Secret mount): ZITADEL_KEY_JSON wins if both set.
+	// Key-file fallback (chart Secret mount): ZITADEL_KEY_JSON wins if both
+	// set. The PATH is retained (not collapsed into the JSON) so the
+	// grant-sync client can re-read it after an ESO rotation — kubelet
+	// refreshes the mounted file; a boot-time-only read would keep the
+	// stale key until an unrelated restart.
 	if keyFile := os.Getenv("ZITADEL_KEY_FILE"); cfg.ZitadelKeyJSON == "" && keyFile != "" {
-		data, err := os.ReadFile(keyFile) //nolint:gosec // G304: path comes from the operator-controlled ZITADEL_KEY_FILE env (chart Secret mount), same trust as CONFIG_FILE
-		if err != nil {
-			return nil, fmt.Errorf("read ZITADEL_KEY_FILE %q: %w", keyFile, err)
+		if _, err := os.Stat(keyFile); err != nil { //nolint:gosec // G703: path comes from the operator-controlled ZITADEL_KEY_FILE env (chart Secret mount), same trust as CONFIG_FILE
+			return nil, fmt.Errorf("ZITADEL_KEY_FILE %q: %w", keyFile, err)
 		}
 
-		cfg.ZitadelKeyJSON = string(data)
+		cfg.ZitadelKeyFile = keyFile
 	}
 
 	var err error
@@ -88,7 +93,7 @@ func (c *Config) validate() error {
 		return fmt.Errorf("ZITADEL_DOMAIN is required")
 	}
 
-	if c.ZitadelKeyJSON == "" {
+	if c.ZitadelKeyJSON == "" && c.ZitadelKeyFile == "" {
 		return fmt.Errorf("ZITADEL_KEY_JSON (or ZITADEL_KEY_FILE) is required")
 	}
 

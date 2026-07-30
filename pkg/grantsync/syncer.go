@@ -2,6 +2,7 @@ package grantsync
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc"
 
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 
@@ -19,12 +22,22 @@ import (
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/project"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user"
 	"github.com/zitadel/zitadel-go/v3/pkg/zitadel"
+
+	"github.com/truvity/zitadel-rbac-mapper/pkg/keysource"
 )
 
 // Syncer synchronizes UserGrants for a user against desired state.
 type Syncer struct {
-	api    *client.Client
 	logger *slog.Logger
+
+	// clientMu guards the api client and its key fingerprint; the client
+	// is rebuilt when the key content changes (rotation awareness).
+	clientMu       sync.Mutex
+	api            *client.Client
+	keys           keysource.Source
+	keyFingerprint [32]byte
+	domain         string
+	port           string
 
 	// user → org lookup cache (see UserOrg).
 	orgCacheMu sync.Mutex
@@ -41,20 +54,60 @@ type userOrgEntry struct {
 }
 
 // New creates a Syncer connected to the Zitadel instance described by cfg.
-// It authenticates using JWT Profile (service account key).
+// It authenticates using JWT Profile (service account key). With cfg.Keys
+// set, the key is fingerprinted per use and the client is rebuilt when the
+// content changes — an ESO rotation of the mounted Secret takes effect
+// without a restart.
 func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) {
-	var keyFile *client.KeyFile
-
-	switch {
-	case cfg.KeyJSON != "":
-		var err error
-
-		keyFile, err = client.ConfigFromKeyFileData([]byte(cfg.KeyJSON))
-		if err != nil {
-			return nil, fmt.Errorf("grantsync: parse key JSON: %w", err)
+	keys := cfg.Keys
+	if keys == nil {
+		if cfg.KeyJSON == "" {
+			return nil, fmt.Errorf("grantsync: Keys or KeyJSON must be set")
 		}
-	default:
-		return nil, fmt.Errorf("grantsync: KeyJSON must be set")
+
+		keys = keysource.Static([]byte(cfg.KeyJSON))
+	}
+
+	s := &Syncer{
+		logger:   logger,
+		keys:     keys,
+		domain:   cfg.Domain,
+		port:     cfg.Port,
+		orgCache: make(map[string]userOrgEntry),
+	}
+
+	if _, err := s.client(ctx); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+// client returns the API client, rebuilding it when the key content
+// changed since the last build. The fingerprint check is one Bytes()
+// call (a stat for file sources) — cheap enough for the per-call path.
+func (s *Syncer) client(ctx context.Context) (*client.Client, error) {
+	s.clientMu.Lock()
+	defer s.clientMu.Unlock()
+
+	// NewWithClient (test harness) injects a client with no key source.
+	if s.keys == nil {
+		return s.api, nil
+	}
+
+	data, err := s.keys.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("grantsync: load key: %w", err)
+	}
+
+	fp := sha256.Sum256(data)
+	if s.api != nil && fp == s.keyFingerprint {
+		return s.api, nil
+	}
+
+	keyFile, err := client.ConfigFromKeyFileData(data)
+	if err != nil {
+		return nil, fmt.Errorf("grantsync: parse key JSON: %w", err)
 	}
 
 	authOption := client.WithAuth(client.AuthenticationJWTProfile(
@@ -64,27 +117,52 @@ func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) 
 	))
 
 	opts := []zitadel.Option{}
-	if cfg.Port != "" {
-		port, err := strconv.ParseUint(cfg.Port, 10, 16)
+	if s.port != "" {
+		port, err := strconv.ParseUint(s.port, 10, 16)
 		if err != nil {
-			return nil, fmt.Errorf("grantsync: invalid port %q: %w", cfg.Port, err)
+			return nil, fmt.Errorf("grantsync: invalid port %q: %w", s.port, err)
 		}
 
 		opts = append(opts, zitadel.WithPort(uint16(port)))
 	}
 
-	api, err := client.New(ctx, zitadel.New(cfg.Domain, opts...), authOption)
+	api, err := client.New(ctx, zitadel.New(s.domain, opts...), authOption)
 	if err != nil {
 		return nil, fmt.Errorf("grantsync: create client: %w", err)
 	}
 
-	return &Syncer{api: api, logger: logger, orgCache: make(map[string]userOrgEntry)}, nil
+	if s.api != nil {
+		s.logger.Info("zitadel client rebuilt after key rotation")
+	}
+
+	s.api = api
+	s.keyFingerprint = fp
+
+	return api, nil
 }
 
 // NewWithClient creates a Syncer on an existing Zitadel API client.
 // Used by the integration test harness to connect to a fake instance.
 func NewWithClient(logger *slog.Logger, api *client.Client) *Syncer {
 	return &Syncer{api: api, logger: logger, orgCache: make(map[string]userOrgEntry)}
+}
+
+// mgmt returns the management service from a rotation-aware client. On a
+// key load/rebuild failure it returns the LAST client's service if one
+// exists (fail-open to last-known-good), else panics are avoided by the
+// construction-time client build in New.
+func mgmt(ctx context.Context, s *Syncer) management.ManagementServiceClient {
+	api, err := s.client(ctx)
+	if err != nil {
+		s.logger.Error("zitadel client rebuild failed; using previous client", "error", err)
+
+		s.clientMu.Lock()
+		defer s.clientMu.Unlock()
+
+		return s.api.ManagementService()
+	}
+
+	return api.ManagementService()
 }
 
 // UserOrg resolves the organization (resource owner) of a user via the
@@ -98,7 +176,7 @@ func (s *Syncer) UserOrg(ctx context.Context, userID string) (string, error) {
 	}
 	s.orgCacheMu.Unlock()
 
-	resp, err := s.api.ManagementService().GetUserByID(ctx, &management.GetUserByIDRequest{ //nolint:staticcheck // v2 API not stable yet
+	resp, err := mgmt(ctx, s).GetUserByID(ctx, &management.GetUserByIDRequest{ //nolint:staticcheck // v2 API not stable yet
 		Id: userID,
 	})
 	if err != nil {
@@ -162,7 +240,7 @@ func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant
 					slog.Any("new_roles", d.RoleKeys),
 				)
 
-				_, err := s.api.ManagementService().UpdateUserGrant(ctx, &management.UpdateUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
+				_, err := mgmt(ctx, s).UpdateUserGrant(ctx, &management.UpdateUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
 					UserId:   userID,
 					GrantId:  grant.GetId(),
 					RoleKeys: d.RoleKeys,
@@ -183,7 +261,7 @@ func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant
 				slog.Any("roles", d.RoleKeys),
 			)
 
-			_, err := s.api.ManagementService().AddUserGrant(ctx, &management.AddUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
+			_, err := mgmt(ctx, s).AddUserGrant(ctx, &management.AddUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
 				UserId:         userID,
 				ProjectId:      projectID,
 				ProjectGrantId: d.ProjectGrantID,
@@ -206,7 +284,7 @@ func (s *Syncer) Sync(ctx context.Context, userID string, desired []DesiredGrant
 				slog.String("project_id", projectID),
 			)
 
-			_, err := s.api.ManagementService().RemoveUserGrant(ctx, &management.RemoveUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
+			_, err := mgmt(ctx, s).RemoveUserGrant(ctx, &management.RemoveUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
 				UserId:  userID,
 				GrantId: grant.GetId(),
 			})
@@ -236,7 +314,7 @@ func (s *Syncer) ListUsers(ctx context.Context) ([]UserInfo, error) {
 	const pageSize = 100
 
 	for {
-		resp, err := s.api.ManagementService().ListUsers(ctx, &management.ListUsersRequest{ //nolint:staticcheck // v2 API not stable yet
+		resp, err := mgmt(ctx, s).ListUsers(ctx, &management.ListUsersRequest{ //nolint:staticcheck // v2 API not stable yet
 			Query: &object.ListQuery{
 				Limit:  pageSize,
 				Offset: offset,
@@ -287,6 +365,32 @@ func (s *Syncer) Client() *client.Client {
 	return s.api
 }
 
+// ManagementAPI returns a management-service view that goes through the
+// rotation-aware client on every call — consumers holding it (the role
+// catalog) survive a key rotation without a restart, unlike a raw
+// ManagementService() handle captured at boot.
+func (s *Syncer) ManagementAPI() ManagementAPI {
+	return ManagementAPI{s: s}
+}
+
+// ManagementAPI adapts the Syncer to the subset of the Zitadel Management
+// API that read-side consumers need (structurally satisfies catalog.API).
+type ManagementAPI struct {
+	s *Syncer
+}
+
+func (a ManagementAPI) ListGrantedProjects(ctx context.Context, in *management.ListGrantedProjectsRequest, opts ...grpc.CallOption) (*management.ListGrantedProjectsResponse, error) {
+	return mgmt(ctx, a.s).ListGrantedProjects(ctx, in, opts...) //nolint:staticcheck // v2 API not stable yet
+}
+
+func (a ManagementAPI) ListProjectRoles(ctx context.Context, in *management.ListProjectRolesRequest, opts ...grpc.CallOption) (*management.ListProjectRolesResponse, error) {
+	return mgmt(ctx, a.s).ListProjectRoles(ctx, in, opts...) //nolint:staticcheck // v2 API not stable yet
+}
+
+func (a ManagementAPI) GetProjectByID(ctx context.Context, in *management.GetProjectByIDRequest, opts ...grpc.CallOption) (*management.GetProjectByIDResponse, error) {
+	return mgmt(ctx, a.s).GetProjectByID(ctx, in, opts...) //nolint:staticcheck // v2 API not stable yet
+}
+
 // listUserGrants returns all active grants for a user (paginated — a user
 // holding more than one page of grants must never have the tail treated as
 // nonexistent, or sync would re-add "missing" grants and miss stale ones).
@@ -298,7 +402,7 @@ func (s *Syncer) listUserGrants(ctx context.Context, userID string) ([]*user.Use
 	const pageSize = 100
 
 	for {
-		resp, err := s.api.ManagementService().ListUserGrants(ctx, &management.ListUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
+		resp, err := mgmt(ctx, s).ListUserGrants(ctx, &management.ListUserGrantRequest{ //nolint:staticcheck // v2 API not stable yet
 			Query: &object.ListQuery{Limit: pageSize, Offset: offset},
 			Queries: []*user.UserGrantQuery{
 				{
@@ -344,7 +448,7 @@ func rolesEqual(a, b []string) bool {
 
 // LookupProjectID resolves a project name to its ID.
 func (s *Syncer) LookupProjectID(ctx context.Context, name string) (string, error) {
-	resp, err := s.api.ManagementService().ListProjects(ctx, &management.ListProjectsRequest{ //nolint:staticcheck // v2 API not stable yet
+	resp, err := mgmt(ctx, s).ListProjects(ctx, &management.ListProjectsRequest{ //nolint:staticcheck // v2 API not stable yet
 		Query: &object.ListQuery{Limit: 100},
 		Queries: []*project.ProjectQuery{
 			{

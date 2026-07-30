@@ -3,7 +3,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -142,8 +141,12 @@ func TestLoad_KeyFile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(cfg.ZitadelKeyJSON, `"keyId":"file"`) {
-		t.Errorf("ZitadelKeyJSON not read from ZITADEL_KEY_FILE: %q", cfg.ZitadelKeyJSON)
+	if cfg.ZitadelKeyFile != keyPath {
+		t.Errorf("ZitadelKeyFile = %q, want %q (path retained for rotation-aware re-reading)", cfg.ZitadelKeyFile, keyPath)
+	}
+
+	if cfg.ZitadelKeyJSON != "" {
+		t.Errorf("ZitadelKeyJSON should stay empty in file mode, got %q", cfg.ZitadelKeyJSON)
 	}
 }
 

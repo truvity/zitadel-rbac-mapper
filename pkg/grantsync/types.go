@@ -1,5 +1,7 @@
 package grantsync
 
+import "github.com/truvity/zitadel-rbac-mapper/pkg/keysource"
+
 // DesiredGrant represents a grant that should exist for a user.
 // ProjectID is the Zitadel project ID (not name).
 //
@@ -29,4 +31,8 @@ type Config struct {
 
 	// KeyJSON is the raw JWT key JSON content for service account authentication.
 	KeyJSON string
+	// Keys optionally supplies the key bytes with rotation awareness
+	// (chart Secret mount). When set it wins over KeyJSON, and the
+	// syncer rebuilds its client when the key content changes.
+	Keys keysource.Source
 }
