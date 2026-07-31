@@ -18,9 +18,13 @@ spec:
         spec:
           serviceAccountName: {{ .Values.serviceAccount.name | default (include "zitadel-rbac-mapper.fullname" .) }}
           restartPolicy: OnFailure
+          securityContext:
+            {{- toYaml .Values.podSecurityContext | nindent 12 }}
           containers:
             - name: sync
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+              securityContext:
+                {{- toYaml $.Values.securityContext | nindent 16 }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command: ["/ko-app/zitadel-rbac-mapper", "sync"]
               env:
