@@ -13,7 +13,7 @@ require (
 	github.com/zalando/go-keyring v0.2.8
 	github.com/zitadel/oidc/v3 v3.48.1
 	github.com/zitadel/zitadel-go/v3 v3.29.2
-	google.golang.org/grpc v1.82.1
+	google.golang.org/grpc v1.83.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
