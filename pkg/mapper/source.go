@@ -1,8 +1,11 @@
 package mapper
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"path"
 	"time"
 
@@ -249,10 +252,26 @@ func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 // ParseConfig parses and validates a v2 config document (YAML; JSON is a
 // YAML subset and works too) and applies defaults.
+//
+// Parsing is STRICT: an unknown field is a fatal error, not a silently
+// dropped one. This component decides authorization claims; on
+// 2026-08-01 a config carrying a field only a newer build understood was
+// fail-open-parsed by the older build into rules that matched nobody,
+// and every fresh login minted empty claims. An authorization component
+// that cannot fully read its policy must stop — a crash-looping pod
+// pages someone; empty claims do not.
 func ParseConfig(data []byte) (*Config, error) {
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+
+	if err := dec.Decode(&cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("parse config: document is empty")
+		}
+
+		return nil, fmt.Errorf("parse config (strict; unknown fields are fatal): %w", err)
 	}
 
 	if err := cfg.validate(); err != nil {
