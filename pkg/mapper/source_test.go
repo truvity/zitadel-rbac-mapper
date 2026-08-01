@@ -250,3 +250,19 @@ orgs:
 		}
 	})
 }
+
+// An unknown field must be fatal: this component decides authorization
+// claims, and a config only a newer build fully understands must stop an
+// older build rather than run as rules that match nobody (2026-08-01).
+func TestParseConfigRejectsUnknownFields(t *testing.T) {
+	_, err := ParseConfig([]byte("orgs: {}\nfutureKnob: true\n"))
+	if err == nil {
+		t.Fatal("an unknown field must fail parsing")
+	}
+}
+
+func TestParseConfigRejectsEmptyDocument(t *testing.T) {
+	if _, err := ParseConfig(nil); err == nil {
+		t.Fatal("an empty document must fail parsing")
+	}
+}
