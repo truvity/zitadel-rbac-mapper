@@ -209,18 +209,16 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 		}
 
 		// Count rule-matched grants for diagnostics.
-		grantsCount := 0
-		if len(groups) > 0 {
-			grantsCount = len(mapper.NewMapper(org.Rules).MapGroups(groups))
-		}
+		grantsCount := countGrants(org.Rules, email, groups)
 
 		// Sync grants (idempotent — no-op if already correct). Zero-rules orgs
 		// claim no grant authority: their desired state is always empty, so
 		// syncing would wipe every existing grant on each login — mirror
-		// batch sync, which skips zero-rules orgs entirely.
-		if deps.Syncer != nil && userID != "" && len(groups) > 0 && len(org.Rules) > 0 {
+		// batch sync, which skips zero-rules orgs entirely. A user with no
+		// groups but a direct user-rule still syncs.
+		if deps.Syncer != nil && userID != "" && rulesApply(org.Rules, email, groups) {
 			userLocks.Lock(userID)
-			syncGrants(ctx, deps, orgID, org.Rules, userID, groups)
+			syncGrants(ctx, deps, orgID, org.Rules, userID, email, groups)
 			userLocks.Unlock(userID)
 		}
 
@@ -238,7 +236,7 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 		if org.AppendRoleClaims {
 			entries := payloadRoleEntries(payload.UserGrants)
 			entries = append(entries, reconcile.RoleEntries(
-				ctx, logger, deps.Catalog, orgID, org.Rules, groups,
+				ctx, logger, deps.Catalog, orgID, org.Rules, email, groups,
 				deps.Source.Settings().ProtectedRoles,
 			)...)
 
@@ -392,9 +390,10 @@ func syncGrants(
 	orgID string,
 	rules []mapper.Rule,
 	userID string,
+	email string,
 	groups []string,
 ) {
-	result, err := reconcile.SyncUser(ctx, deps.reconcileDeps(), orgID, rules, userID, groups)
+	result, err := reconcile.SyncUser(ctx, deps.reconcileDeps(), orgID, rules, userID, email, groups)
 	if err != nil {
 		deps.Logger.WarnContext(ctx, "grant sync failed",
 			slog.String("org_id", orgID),
@@ -414,4 +413,20 @@ func syncGrants(
 			slog.Int("removed", result.Removed),
 		)
 	}
+}
+
+// rulesApply reports whether the org's rules can grant anything to this
+// identity: some rules exist AND the user brings groups or is named by a
+// user-rule directly.
+func rulesApply(rules []mapper.Rule, email string, groups []string) bool {
+	return len(rules) > 0 && (len(groups) > 0 || mapper.RulesNameUser(rules, email))
+}
+
+// countGrants counts rule-matched grants, for diagnostics only.
+func countGrants(rules []mapper.Rule, email string, groups []string) int {
+	if !rulesApply(rules, email, groups) {
+		return 0
+	}
+
+	return len(mapper.NewMapper(rules).MapIdentity(email, groups))
 }

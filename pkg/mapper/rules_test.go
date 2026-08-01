@@ -272,3 +272,34 @@ func TestExpandRoles_PrefixSuffixPattern(t *testing.T) {
 		t.Errorf("got roles %v, want %v", roles, want)
 	}
 }
+
+// A rule naming users directly grants without any directory group — the
+// shape used for the first roster operators, where minting a group would
+// outweigh the grant.
+func TestUserRulesMatchByEmail(t *testing.T) {
+	m := NewMapper([]Rule{
+		{Users: []string{"o.tsarev@truvity.com"}, Grants: []Grant{{Project: "p1", Roles: []string{"roster:operator"}}}},
+		{Group: "team@x.com", Grants: []Grant{{Project: "p1", Roles: []string{"cluster:viewer"}}}},
+	})
+
+	// Case-insensitive email match, no groups at all.
+	grants := m.MapIdentity("O.Tsarev@Truvity.com", nil)
+	if len(grants) != 1 || grants[0].Roles[0] != "roster:operator" {
+		t.Fatalf("expected the user rule to grant roster:operator, got %+v", grants)
+	}
+
+	// A different user with the group gets only the group rule.
+	grants = m.MapIdentity("someone@truvity.com", []string{"team@x.com"})
+	if len(grants) != 1 || grants[0].Roles[0] != "cluster:viewer" {
+		t.Fatalf("expected only the group grant, got %+v", grants)
+	}
+
+	// MapGroups (no identity) must never match user rules.
+	if got := m.MapGroups(nil); len(got) != 0 {
+		t.Fatalf("user rules must not match without an identity, got %+v", got)
+	}
+
+	if !RulesNameUser(m.rules, "o.tsarev@truvity.com") {
+		t.Fatal("RulesNameUser must find the named user")
+	}
+}

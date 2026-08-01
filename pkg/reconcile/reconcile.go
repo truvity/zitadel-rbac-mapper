@@ -62,10 +62,11 @@ func Desired(
 	cat *catalog.Catalog,
 	orgID string,
 	rules []mapper.Rule,
+	email string,
 	groups []string,
 	protectedRoles []string,
 ) []grantsync.DesiredGrant {
-	mapped := mapper.NewMapper(rules).MapGroups(groups)
+	mapped := mapper.NewMapper(rules).MapIdentity(email, groups)
 
 	desired := make([]grantsync.DesiredGrant, 0, len(mapped))
 
@@ -115,6 +116,7 @@ func RoleEntries(
 	cat *catalog.Catalog,
 	orgID string,
 	rules []mapper.Rule,
+	email string,
 	groups []string,
 	protectedRoles []string,
 ) []string {
@@ -122,7 +124,7 @@ func RoleEntries(
 		return nil
 	}
 
-	mapped := mapper.NewMapper(rules).MapGroups(groups)
+	mapped := mapper.NewMapper(rules).MapIdentity(email, groups)
 
 	var entries []string
 
@@ -159,9 +161,10 @@ func SyncUser(
 	orgID string,
 	rules []mapper.Rule,
 	userID string,
+	email string,
 	groups []string,
 ) (*grantsync.SyncResult, error) {
-	desired := Desired(ctx, deps.Logger, deps.Catalog, orgID, rules, groups, deps.Source.Settings().ProtectedRoles)
+	desired := Desired(ctx, deps.Logger, deps.Catalog, orgID, rules, email, groups, deps.Source.Settings().ProtectedRoles)
 
 	result, err := deps.Syncer.Sync(ctx, userID, desired, orgID)
 	if err != nil {
@@ -323,7 +326,9 @@ func All(ctx context.Context, deps *Deps, opts Options) (*Result, error) {
 	locks := deps.locks()
 
 	for _, p := range pending {
-		if len(p.groups) == 0 && !opts.Force {
+		// A user with no groups but a direct user-rule still has a grant
+		// to sync; only users NO rule can reach are skipped unforced.
+		if len(p.groups) == 0 && !opts.Force && !mapper.RulesNameUser(p.rules, p.user.Email) {
 			deps.Logger.InfoContext(ctx, "user resolved to zero groups, skipping (no pruning without force)",
 				slog.String("org_id", p.orgID),
 				slog.String("user_id", p.user.ID),
@@ -337,7 +342,7 @@ func All(ctx context.Context, deps *Deps, opts Options) (*Result, error) {
 
 		locks.Lock(p.user.ID)
 
-		syncRes, syncErr := SyncUser(ctx, deps, p.orgID, p.rules, p.user.ID, p.groups)
+		syncRes, syncErr := SyncUser(ctx, deps, p.orgID, p.rules, p.user.ID, p.user.Email, p.groups)
 
 		locks.Unlock(p.user.ID)
 
