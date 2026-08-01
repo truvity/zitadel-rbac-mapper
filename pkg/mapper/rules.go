@@ -9,8 +9,14 @@ import (
 
 // Rule maps a single directory group to one or more grants.
 type Rule struct {
-	Group  string  `yaml:"group" json:"group"`
-	Grants []Grant `yaml:"grants" json:"grants"`
+	// Group matches every member of a directory group. Either Group or
+	// Users must be set; both on one rule is valid (union).
+	Group string `yaml:"group" json:"group"`
+	// Users matches the named account emails directly, case-insensitive —
+	// for grants scoped to specific people (initial roster operators)
+	// where minting a directory group would outweigh the grant itself.
+	Users  []string `yaml:"users" json:"users"`
+	Grants []Grant  `yaml:"grants" json:"grants"`
 }
 
 // Grant represents a desired Zitadel UserGrant (project + roles).
@@ -44,10 +50,17 @@ func NewMapper(rules []Rule) *Mapper {
 }
 
 // MapGroups takes a list of group emails and returns the desired grants
-// by matching against the configured rules. Roles and patterns for the same
-// project are aggregated and deduplicated. Output is sorted by project for
-// deterministic behavior.
+// by matching against the configured rules. Kept for callers with no user
+// identity at hand; user-rules never match through it.
 func (m *Mapper) MapGroups(groups []string) []DesiredGrant {
+	return m.MapIdentity("", groups)
+}
+
+// MapIdentity resolves desired grants for one user: rules match by group
+// membership or by naming the user's email directly (case-insensitive).
+// Roles and patterns for the same project are aggregated and deduplicated.
+// Output is sorted by project for deterministic behavior.
+func (m *Mapper) MapIdentity(email string, groups []string) []DesiredGrant {
 	groupSet := make(map[string]struct{}, len(groups))
 	for _, g := range groups {
 		groupSet[g] = struct{}{}
@@ -58,7 +71,7 @@ func (m *Mapper) MapGroups(groups []string) []DesiredGrant {
 	projectPatterns := make(map[string]map[string]struct{})
 
 	for _, rule := range m.rules {
-		if _, ok := groupSet[rule.Group]; !ok {
+		if !ruleMatches(rule, email, groupSet) {
 			continue
 		}
 

@@ -296,8 +296,8 @@ func (c *Config) validate() error {
 		}
 
 		for j, rule := range org.Rules {
-			if rule.Group == "" {
-				return fmt.Errorf("orgs[%s].rules[%d]: group is required", orgID, j)
+			if rule.Group == "" && len(rule.Users) == 0 {
+				return fmt.Errorf("orgs[%s].rules[%d]: group or users is required", orgID, j)
 			}
 
 			for k, grant := range rule.Grants {
