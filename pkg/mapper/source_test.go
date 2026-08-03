@@ -266,3 +266,29 @@ func TestParseConfigRejectsEmptyDocument(t *testing.T) {
 		t.Fatal("an empty document must fail parsing")
 	}
 }
+
+// employees: yaml keys normalize to lowercase and the prefix defaults.
+func TestConfigEmployeesNormalizeAndDefaultPrefix(t *testing.T) {
+	doc := []byte(`
+orgs:
+  "org1":
+    name: Test
+    resolver:
+      url: http://resolver.local
+employees:
+  " User1@Example.com ": otsar
+`)
+
+	cfg, err := ParseConfig(doc)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if got := cfg.Employees["user1@example.com"]; got != "otsar" {
+		t.Errorf("employee keys must normalize to lowercase/trimmed; got map %v", cfg.Employees)
+	}
+
+	if got := cfg.Settings().EmployeePrefix; got != "emp:" {
+		t.Errorf("EmployeePrefix must default to emp:, got %q", got)
+	}
+}

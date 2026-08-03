@@ -253,6 +253,16 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 			claimValues, roleEntriesCount = mergeClaimEntries(base, entries)
 		}
 
+		// Employee identity entry (instance-global, independent of the
+		// role-claim flags): one intentional "{prefix}{slug}" entry for
+		// mapped employees — downstream tooling derives personal
+		// namespaces from it. Machine users never reach here (skipped
+		// above), so the entry is human-only by construction.
+		settings := deps.Source.Settings()
+		if slug, ok := settings.Employees[strings.ToLower(email)]; ok && slug != "" {
+			claimValues, _ = mergeClaimEntries(claimValues, []string{settings.EmployeePrefix + slug})
+		}
+
 		// One structured line per enrichment request: WARN on zero groups so
 		// "empty claims" responses are diagnosable from logs. Identified by
 		// user_id; the email appears only in the debug-level line above.

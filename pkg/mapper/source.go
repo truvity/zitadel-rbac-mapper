@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -73,6 +74,13 @@ type Settings struct {
 
 	// ProtectedRoles are role keys never granted via rolePatterns expansion.
 	ProtectedRoles []string
+
+	// Employees maps lowercased user emails to short identity slugs; the
+	// enrichment appends "{EmployeePrefix}{slug}" to the groups claim.
+	Employees map[string]string
+
+	// EmployeePrefix prefixes employee slug claim entries. Default "emp:".
+	EmployeePrefix string
 }
 
 // Config is the v2 configuration file schema.
@@ -118,6 +126,20 @@ type Config struct {
 	// Orgs maps Zitadel organization IDs to their configuration.
 	// Users from orgs absent here get no enrichment (fail-closed).
 	Orgs map[string]OrgConfig `yaml:"orgs"`
+
+	// Employees maps user emails (matched case-insensitively) to short
+	// identity slugs. When a webhook user's email is present here, the
+	// enrichment appends one "{employeePrefix}{slug}" entry (e.g.
+	// "emp:otsar") to the groups claim — an INTENTIONAL identity entry
+	// downstream tooling uses to derive personal namespaces. Independent
+	// of appendRoleClaims/roleClaimsOnly: it is vocabulary this config
+	// asks for, not a directory group. Instance-global because emails are
+	// unique across orgs.
+	Employees map[string]string `yaml:"employees"`
+
+	// EmployeePrefix overrides the prefix for employee slug claim
+	// entries. Default: "emp:".
+	EmployeePrefix string `yaml:"employeePrefix"`
 }
 
 // SecurityConfig holds instance-global webhook verification settings.
@@ -144,6 +166,12 @@ func (c *Config) Settings() Settings {
 		RequireExp:     true,
 		MaxEmptyRatio:  DefaultMaxEmptyRatio,
 		ProtectedRoles: c.ProtectedRoles,
+		Employees:      c.Employees,
+		EmployeePrefix: c.EmployeePrefix,
+	}
+
+	if s.EmployeePrefix == "" {
+		s.EmployeePrefix = "emp:"
 	}
 
 	if c.Security.RequireExp != nil {
@@ -344,6 +372,15 @@ func (c *Config) validate() error {
 func (c *Config) normalize() {
 	if c.RoleCacheTTL == 0 {
 		c.RoleCacheTTL = Duration(DefaultRoleCacheTTL)
+	}
+
+	if len(c.Employees) > 0 {
+		employees := make(map[string]string, len(c.Employees))
+		for email, slug := range c.Employees {
+			employees[strings.ToLower(strings.TrimSpace(email))] = strings.TrimSpace(slug)
+		}
+
+		c.Employees = employees
 	}
 
 	for orgID, org := range c.Orgs {
