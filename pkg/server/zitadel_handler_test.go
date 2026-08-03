@@ -32,6 +32,7 @@ import (
 type mockSource struct {
 	orgs       map[string]mapper.OrgConfig
 	refreshErr error
+	settings   *mapper.Settings
 }
 
 func (m *mockSource) Org(_ context.Context, orgID string) (mapper.OrgConfig, bool) {
@@ -51,6 +52,10 @@ func (m *mockSource) Orgs() []mapper.OrgInfo {
 func (m *mockSource) RoleCacheTTL() time.Duration { return time.Minute }
 
 func (m *mockSource) Settings() mapper.Settings {
+	if m.settings != nil {
+		return *m.settings
+	}
+
 	return mapper.Settings{RequireExp: true, MaxEmptyRatio: mapper.DefaultMaxEmptyRatio}
 }
 
@@ -676,5 +681,69 @@ func TestWebhook_RoleClaimsOnly_GroupsStillDriveGrants(t *testing.T) {
 		if strings.Contains(v, "@") {
 			t.Errorf("claim leaked a directory email: %q", v)
 		}
+	}
+}
+
+// The employee identity entry: an instance-global email→slug map appends
+// one "{prefix}{slug}" entry to the claim — independent of the role-claim
+// flags, and absent for unmapped users.
+func TestWebhook_EmployeeSlugAppended(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		"user1@example.com": {"admins@example.com"},
+	})
+
+	var logBuf bytes.Buffer
+
+	deps, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"org1": orgConfig(backend.URL, nil),
+	}, &logBuf)
+	deps.Source.(*mockSource).settings = &mapper.Settings{
+		RequireExp:     true,
+		MaxEmptyRatio:  mapper.DefaultMaxEmptyRatio,
+		Employees:      map[string]string{"user1@example.com": "otsar"},
+		EmployeePrefix: "emp:",
+	}
+
+	resp := postWebhook(t, app, webhookPayload("user1@example.com", "org1"))
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	got := decodeGroupsClaim(t, resp.Body)
+
+	want := []string{"admins@example.com", "emp:otsar"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("employee entry must append after groups; got %v, want %v", got, want)
+	}
+}
+
+// A user absent from the employees map gets no entry — and lookup is
+// case-insensitive on the payload side (the config normalizes its keys).
+func TestWebhook_EmployeeSlugAbsentAndCaseInsensitive(t *testing.T) {
+	backend := groupsBackend(t, map[string][]string{
+		"other@example.com": {"admins@example.com"},
+		"User1@example.com": {"admins@example.com"},
+	})
+
+	var logBuf bytes.Buffer
+
+	deps, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"org1": orgConfig(backend.URL, nil),
+	}, &logBuf)
+	deps.Source.(*mockSource).settings = &mapper.Settings{
+		RequireExp:     true,
+		MaxEmptyRatio:  mapper.DefaultMaxEmptyRatio,
+		Employees:      map[string]string{"user1@example.com": "otsar"},
+		EmployeePrefix: "emp:",
+	}
+
+	resp := postWebhook(t, app, webhookPayload("other@example.com", "org1"))
+	if got := decodeGroupsClaim(t, resp.Body); !reflect.DeepEqual(got, []string{"admins@example.com"}) {
+		t.Errorf("unmapped user must get no employee entry; got %v", got)
+	}
+
+	resp = postWebhook(t, app, webhookPayload("User1@example.com", "org1"))
+	if got := decodeGroupsClaim(t, resp.Body); !reflect.DeepEqual(got, []string{"admins@example.com", "emp:otsar"}) {
+		t.Errorf("lookup must be case-insensitive on the payload email; got %v", got)
 	}
 }

@@ -4,6 +4,11 @@ All notable changes to zitadel-rbac-mapper are documented here.
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-08-03
+
+### Added
+- **`employees:`** (instance-global, email → slug, case-insensitive keys) + **`employeePrefix`** (default `emp:`): the enrichment appends one `{prefix}{slug}` identity entry (e.g. `emp:otsar`) to the groups claim for mapped users — downstream tooling derives personal namespaces from it (fleetctl RFC). Independent of `appendRoleClaims`/`roleClaimsOnly` (an intentional entry, not a directory group); machine users never receive it (already skipped before enrichment).
+
 ## [0.18.0] — 2026-07-25
 
 ### Added
