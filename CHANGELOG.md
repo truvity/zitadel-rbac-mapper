@@ -4,6 +4,18 @@ All notable changes to zitadel-rbac-mapper are documented here.
 
 ## [Unreleased]
 
+### Added
+- Suspension awareness end to end (INF-518, needs google-group-sync
+  ≥ 0.12.0 — an older resolver never sets the field, which fails safe):
+  the resolver's `suspended` signal now means "gets nothing, keeps
+  nothing". Login-time enrichment answers a suspended account with
+  empty claims and prunes every mapper-managed grant (user-rules
+  included); batch sync prunes the same way — the one zero-desired case
+  that prunes without `--force`, because it is the directory's positive
+  answer rather than an absence — and suspended accounts no longer
+  count toward the empty-ratio abort. New webhook outcome `suspended`,
+  new batch counter `users_suspended_pruned`.
+
 ## [0.22.0] — 2026-08-03
 
 ### Added

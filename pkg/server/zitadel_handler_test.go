@@ -747,3 +747,85 @@ func TestWebhook_EmployeeSlugAbsentAndCaseInsensitive(t *testing.T) {
 		t.Errorf("lookup must be case-insensitive on the payload email; got %v", got)
 	}
 }
+
+// suspendedBackend is groupsBackend plus the resolver's suspension
+// signal for selected emails.
+func suspendedBackend(t *testing.T, groups map[string][]string, suspended map[string]bool) *httptest.Server {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+		if len(parts) != 3 {
+			w.WriteHeader(http.StatusBadRequest)
+
+			return
+		}
+
+		email := parts[1]
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"groups":    groups[email],
+			"suspended": suspended[email],
+		})
+	}))
+
+	t.Cleanup(srv.Close)
+
+	return srv
+}
+
+// A suspended account gets nothing: whatever groups the directory still
+// lists and whatever emp slug the mapping carries, the claims come back
+// empty — the account cannot start a login, and a session minted before
+// the suspension must stop carrying authorization the moment it
+// refreshes through the mapper.
+func TestWebhook_SuspendedUser_EmptyClaims(t *testing.T) {
+	backend := suspendedBackend(t,
+		map[string][]string{"gone@example.com": {"team-x@example.com"}},
+		map[string]bool{"gone@example.com": true},
+	)
+
+	var logBuf bytes.Buffer
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"org1": orgConfig(backend.URL, []mapper.Rule{{Group: "team-x@example.com"}}),
+	}, &logBuf)
+
+	resp := postWebhook(t, app, webhookPayload("gone@example.com", "org1"))
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	groups := decodeGroupsClaim(t, resp.Body)
+	if len(groups) != 0 {
+		t.Errorf("expected empty claims for suspended user, got %v", groups)
+	}
+
+	if !strings.Contains(logBuf.String(), "account suspended in its directory") {
+		t.Error("expected the suspension WARN in logs")
+	}
+}
+
+// An active account with the same shape keeps its claims — the flag, not
+// the code path, decides.
+func TestWebhook_ActiveUser_ClaimsSurviveSuspendedField(t *testing.T) {
+	backend := suspendedBackend(t,
+		map[string][]string{"live@example.com": {"team-x@example.com"}},
+		map[string]bool{},
+	)
+
+	var logBuf bytes.Buffer
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"org1": orgConfig(backend.URL, []mapper.Rule{{Group: "team-x@example.com"}}),
+	}, &logBuf)
+
+	resp := postWebhook(t, app, webhookPayload("live@example.com", "org1"))
+
+	groups := decodeGroupsClaim(t, resp.Body)
+	if len(groups) != 1 || groups[0] != "team-x@example.com" {
+		t.Errorf("expected the group claim to survive, got %v", groups)
+	}
+}
