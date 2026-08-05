@@ -108,7 +108,7 @@ func TestOrgResolver_BulkheadFailsFastWhenSaturated(t *testing.T) {
 		go func() {
 			defer wg.Done()
 
-			_, _ = res.ResolveGroups(context.Background(), "u@example.com")
+			_, _ = res.ResolveUser(context.Background(), "u@example.com")
 		}()
 	}
 
@@ -117,7 +117,7 @@ func TestOrgResolver_BulkheadFailsFastWhenSaturated(t *testing.T) {
 
 	start := time.Now()
 
-	_, err := res.ResolveGroups(context.Background(), "u@example.com")
+	_, err := res.ResolveUser(context.Background(), "u@example.com")
 	if !errors.Is(err, ErrBulkheadSaturated) {
 		t.Fatalf("expected ErrBulkheadSaturated, got %v", err)
 	}
@@ -144,13 +144,13 @@ func TestOrgResolver_CircuitOpensAndRecovers(t *testing.T) {
 	fail.Store(true)
 
 	for range 3 {
-		if _, err := res.ResolveGroups(context.Background(), "u@example.com"); err == nil {
+		if _, err := res.ResolveUser(context.Background(), "u@example.com"); err == nil {
 			t.Fatal("expected failure")
 		}
 	}
 
 	// Circuit is now open: requests short-circuit without hitting the server.
-	_, err := res.ResolveGroups(context.Background(), "u@example.com")
+	_, err := res.ResolveUser(context.Background(), "u@example.com")
 	if err == nil || !isCircuitOpenErr(err) {
 		t.Fatalf("expected circuit-open error, got %v", err)
 	}
@@ -159,13 +159,13 @@ func TestOrgResolver_CircuitOpensAndRecovers(t *testing.T) {
 	fail.Store(false)
 	time.Sleep(150 * time.Millisecond)
 
-	groups, err := res.ResolveGroups(context.Background(), "u@example.com")
+	ug, err := res.ResolveUser(context.Background(), "u@example.com")
 	if err != nil {
 		t.Fatalf("expected recovery after open duration, got %v", err)
 	}
 
-	if len(groups) != 1 {
-		t.Fatalf("expected 1 group after recovery, got %d", len(groups))
+	if len(ug.Groups) != 1 {
+		t.Fatalf("expected 1 group after recovery, got %d", len(ug.Groups))
 	}
 }
 

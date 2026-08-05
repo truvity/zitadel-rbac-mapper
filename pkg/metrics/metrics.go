@@ -18,6 +18,7 @@ const (
 	OutcomeMachine    = "machine"     // machine user, skipped
 	OutcomeInvalidJWT = "invalid_jwt" // JWT verification failed
 	OutcomeBadPayload = "bad_payload" // payload parse failed
+	OutcomeSuspended  = "suspended"   // directory reports the account suspended — empty claims, grants pruned
 )
 
 // Resolver outcome label values.

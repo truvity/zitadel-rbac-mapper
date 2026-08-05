@@ -12,6 +12,7 @@ import (
 	"github.com/truvity/zitadel-rbac-mapper/pkg/mapper"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/metrics"
 	"github.com/truvity/zitadel-rbac-mapper/pkg/reconcile"
+	"github.com/truvity/zitadel-rbac-mapper/pkg/resolver"
 )
 
 // Zitadel Actions V2 function payload types.
@@ -197,15 +198,13 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 		)
 
 		// Resolve groups via the org's isolated resolver.
-		groups, err := deps.Resolvers.For(orgID, org.Resolver).ResolveGroups(ctx, email)
-		if err != nil {
-			logger.WarnContext(ctx, "groups resolver failed, returning empty groups",
-				slog.String("org_id", orgID),
-				slog.String("user_id", userID),
-				slog.Any("error", err),
-			)
+		ug := resolveUserGroups(ctx, deps, logger, &org, orgID, userID, email)
+		groups := ug.Groups
 
-			groups = []string{}
+		// A suspended account gets nothing and keeps nothing — see
+		// respondSuspended.
+		if ug.Suspended {
+			return respondSuspended(c, deps, userLocks, logger, orgID, userID, len(org.Rules) > 0)
 		}
 
 		// Count rule-matched grants for diagnostics.
@@ -382,6 +381,70 @@ func observeClaimSize(deps *Deps, orgID string, groups []string) {
 	}
 
 	deps.Metrics.GroupsClaimBytes.WithLabelValues(orgID).Observe(float64(size))
+}
+
+// resolveUserGroups resolves the user through the org's isolated
+// resolver, degrading to empty groups on error: enrichment must answer
+// even when the resolver cannot. The degraded answer never carries the
+// suspended flag — revocation needs the directory's word, not a
+// transport failure.
+func resolveUserGroups(
+	ctx context.Context,
+	deps *Deps,
+	logger *slog.Logger,
+	org *mapper.OrgConfig,
+	orgID, userID, email string,
+) resolver.UserGroups {
+	ug, err := deps.Resolvers.For(orgID, org.Resolver).ResolveUser(ctx, email)
+	if err != nil {
+		logger.WarnContext(ctx, "groups resolver failed, returning empty groups",
+			slog.String("org_id", orgID),
+			slog.String("user_id", userID),
+			slog.Any("error", err),
+		)
+
+		return resolver.UserGroups{Groups: []string{}}
+	}
+
+	if ug.Groups == nil {
+		ug.Groups = []string{}
+	}
+
+	return ug
+}
+
+// respondSuspended is the whole answer for a suspended account: empty
+// claims AND every grant the mapper manages for the user pruned —
+// user-rules included. The directory said "suspended" positively, so
+// unlike the ambiguous zero-groups case this prunes without force.
+// Zitadel sessions outlive suspension for up to the external-login
+// check lifetime; this closes that window from the inside. Zero-rules
+// orgs claim no grant authority, mirroring batch sync.
+func respondSuspended(c fiber.Ctx, deps *Deps, userLocks *UserLocks, logger *slog.Logger, orgID, userID string, orgHasRules bool) error {
+	ctx := c.Context()
+
+	logger.WarnContext(ctx, "account suspended in its directory — empty claims, pruning grants",
+		slog.String("org_id", orgID),
+		slog.String("user_id", userID),
+	)
+
+	if deps.Syncer != nil && userID != "" && orgHasRules {
+		userLocks.Lock(userID)
+
+		if _, pruneErr := deps.Syncer.Sync(ctx, userID, nil, orgID); pruneErr != nil {
+			logger.WarnContext(ctx, "failed to prune suspended user's grants",
+				slog.String("org_id", orgID),
+				slog.String("user_id", userID),
+				slog.Any("error", pruneErr),
+			)
+		}
+
+		userLocks.Unlock(userID)
+	}
+
+	deps.observeWebhook(orgID, metrics.OutcomeSuspended)
+
+	return emptyGroupsResponse(c)
 }
 
 func emptyGroupsResponse(c fiber.Ctx) error {

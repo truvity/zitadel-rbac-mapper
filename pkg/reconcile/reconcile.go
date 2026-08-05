@@ -206,6 +206,10 @@ type Result struct {
 	// UsersSkippedEmpty counts users whose groups resolved successfully to an
 	// empty list and were therefore skipped (no pruning). Force overrides.
 	UsersSkippedEmpty int `json:"users_skipped_empty"`
+
+	// UsersSuspendedPruned counts users whose directory reported the
+	// account suspended and whose grants were therefore pruned in full.
+	UsersSuspendedPruned int `json:"users_suspended_pruned"`
 }
 
 // Options control a batch reconciliation run.
@@ -229,6 +233,11 @@ type resolvedUser struct {
 	rules  []mapper.Rule
 	user   grantsync.UserInfo
 	groups []string
+	// suspended is the directory's own signal for the account
+	// (resolver "suspended" field). It turns the ambiguous zero-group
+	// answer into a positive revocation: this user's grants are pruned,
+	// user-rules included.
+	suspended bool
 }
 
 // All runs a full reconciliation in two phases. Phase 1: for every configured
@@ -281,7 +290,7 @@ func All(ctx context.Context, deps *Deps, opts Options) (*Result, error) {
 				continue
 			}
 
-			groups, resolveErr := res.ResolveGroups(ctx, u.Email)
+			ug, resolveErr := res.ResolveUser(ctx, u.Email)
 			if resolveErr != nil {
 				deps.Logger.WarnContext(ctx, "failed to resolve groups for user, skipping",
 					slog.String("org_id", orgInfo.ID),
@@ -293,11 +302,14 @@ func All(ctx context.Context, deps *Deps, opts Options) (*Result, error) {
 				continue
 			}
 
-			if len(groups) == 0 {
+			// A suspended account resolving to zero groups is the
+			// EXPECTED answer, not a resolver anomaly — it must not
+			// push the run toward the empty-ratio abort.
+			if len(ug.Groups) == 0 && !ug.Suspended {
 				resolvedEmpty++
 			}
 
-			pending = append(pending, resolvedUser{orgID: orgInfo.ID, rules: org.Rules, user: u, groups: groups})
+			pending = append(pending, resolvedUser{orgID: orgInfo.ID, rules: org.Rules, user: u, groups: ug.Groups, suspended: ug.Suspended})
 		}
 	}
 
@@ -326,6 +338,44 @@ func All(ctx context.Context, deps *Deps, opts Options) (*Result, error) {
 	locks := deps.locks()
 
 	for _, p := range pending {
+		// A SUSPENDED account is a positive revocation: every grant the
+		// mapper manages for this user goes, user-rules included — the
+		// account cannot log in, and whatever the address is re-issued
+		// to must not inherit its grants. This is the only path where
+		// zero desired grants prune without --force, because it is the
+		// only zero that is a directory's answer rather than an absence.
+		if p.suspended {
+			locks.Lock(p.user.ID)
+
+			pruneRes, pruneErr := deps.Syncer.Sync(ctx, p.user.ID, nil, p.orgID)
+
+			locks.Unlock(p.user.ID)
+
+			if pruneErr != nil {
+				deps.Logger.WarnContext(ctx, "failed to prune suspended user's grants, skipping",
+					slog.String("org_id", p.orgID),
+					slog.String("user_id", p.user.ID),
+					slog.String("email", p.user.Email),
+					slog.Any("error", pruneErr),
+				)
+
+				continue
+			}
+
+			if pruneRes.Removed > 0 {
+				deps.Logger.InfoContext(ctx, "pruned suspended user's grants",
+					slog.String("org_id", p.orgID),
+					slog.String("user_id", p.user.ID),
+					slog.Int("removed", pruneRes.Removed),
+				)
+			}
+
+			result.UsersSuspendedPruned++
+			result.GrantsRemoved += pruneRes.Removed
+
+			continue
+		}
+
 		// A user with no groups but a direct user-rule still has a grant
 		// to sync; only users NO rule can reach are skipped unforced.
 		if len(p.groups) == 0 && !opts.Force && !mapper.RulesNameUser(p.rules, p.user.Email) {
@@ -366,6 +416,7 @@ func All(ctx context.Context, deps *Deps, opts Options) (*Result, error) {
 	deps.Logger.InfoContext(ctx, "full sync complete",
 		slog.Int("users_processed", result.UsersProcessed),
 		slog.Int("users_skipped_empty", result.UsersSkippedEmpty),
+		slog.Int("users_suspended_pruned", result.UsersSuspendedPruned),
 		slog.Bool("force", opts.Force),
 		slog.Int("grants_added", result.GrantsAdded),
 		slog.Int("grants_updated", result.GrantsUpdated),

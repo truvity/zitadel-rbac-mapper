@@ -74,7 +74,7 @@ type OrgResolver struct {
 	orgID   string
 	inner   *HTTPResolver
 	sem     chan struct{}
-	breaker *gobreaker.CircuitBreaker[[]string]
+	breaker *gobreaker.CircuitBreaker[UserGroups]
 	metrics *metrics.Metrics
 }
 
@@ -84,7 +84,7 @@ var _ GroupsResolver = (*OrgResolver)(nil)
 func newOrgResolver(logger *slog.Logger, m *metrics.Metrics, orgID string, cfg mapper.ResolverConfig) *OrgResolver {
 	cb := cfg.CircuitBreaker
 
-	breaker := gobreaker.NewCircuitBreaker[[]string](gobreaker.Settings{
+	breaker := gobreaker.NewCircuitBreaker[UserGroups](gobreaker.Settings{
 		Name:        "resolver-" + orgID,
 		MaxRequests: cb.HalfOpenProbes,
 		Timeout:     cb.OpenDuration.Std(),
@@ -117,25 +117,26 @@ func newOrgResolver(logger *slog.Logger, m *metrics.Metrics, orgID string, cfg m
 	}
 }
 
-// ResolveGroups resolves groups through the org's bulkhead and circuit breaker.
+// ResolveUser resolves groups (plus the suspension signal) through the
+// org's bulkhead and circuit breaker.
 // Failure modes (all returned as errors — the caller decides the fallback):
 //   - ErrBulkheadSaturated: too many in-flight requests for this org
 //   - gobreaker.ErrOpenState / ErrTooManyRequests: circuit open
 //   - transport/HTTP errors from the resolver itself
-func (o *OrgResolver) ResolveGroups(ctx context.Context, email string) ([]string, error) {
+func (o *OrgResolver) ResolveUser(ctx context.Context, email string) (UserGroups, error) {
 	// Fail-fast bulkhead: never queue behind a slow resolver.
 	select {
 	case o.sem <- struct{}{}:
 		defer func() { <-o.sem }()
 	default:
 		o.observe(metrics.ResolverRejected, 0)
-		return nil, fmt.Errorf("org %s: %w", o.orgID, ErrBulkheadSaturated)
+		return UserGroups{}, fmt.Errorf("org %s: %w", o.orgID, ErrBulkheadSaturated)
 	}
 
 	start := time.Now()
 
-	groups, err := o.breaker.Execute(func() ([]string, error) {
-		return o.inner.ResolveGroups(ctx, email)
+	ug, err := o.breaker.Execute(func() (UserGroups, error) {
+		return o.inner.ResolveUser(ctx, email)
 	})
 
 	elapsed := time.Since(start)
@@ -143,13 +144,13 @@ func (o *OrgResolver) ResolveGroups(ctx context.Context, email string) ([]string
 	switch {
 	case err == nil:
 		o.observe(metrics.ResolverSuccess, elapsed)
-		return groups, nil
+		return ug, nil
 	case errors.Is(err, gobreaker.ErrOpenState), errors.Is(err, gobreaker.ErrTooManyRequests):
 		o.observe(metrics.ResolverCircuitOpen, elapsed)
-		return nil, fmt.Errorf("org %s: resolver circuit open: %w", o.orgID, err)
+		return UserGroups{}, fmt.Errorf("org %s: resolver circuit open: %w", o.orgID, err)
 	default:
 		o.observe(metrics.ResolverError, elapsed)
-		return nil, err
+		return UserGroups{}, err
 	}
 }
 
