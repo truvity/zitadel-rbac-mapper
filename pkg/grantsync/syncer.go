@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/zitadel/oidc/v3/pkg/oidc"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/zitadel/zitadel-go/v3/pkg/client"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/middleware"
@@ -34,6 +36,28 @@ type Syncer struct {
 // userOrgCacheTTL bounds the staleness of the user→org lookup cache used
 // when a webhook payload (e.g. preaccesstoken) carries no org.
 const userOrgCacheTTL = 5 * time.Minute
+
+// zitadelKeepalive keeps the gRPC connection to Zitadel Cloud demonstrably
+// alive across idle periods (INF-528).
+//
+// The pod egresses through a NAT gateway, which drops idle flows after ~350s
+// WITHOUT sending RST or FIN. The client never learns the connection is dead;
+// the next RPC parks in read() until the kernel's TCP retransmission timeout
+// (~16 minutes) gives up. catalog.refreshTimeout now bounds the damage, but
+// the connection should not be dying in the first place.
+//
+// Time is set below the NAT idle window so the flow is never idle long enough
+// to be reaped. PermitWithoutStream is required: the dropped connections are
+// precisely the ones with no active RPC. gRPC servers reject pings that are
+// too frequent (GOAWAY ENHANCE_YOUR_CALM); the common server minimum is 5
+// minutes for streamless pings, so 150s is deliberately conservative against
+// the NAT window while remaining a single knob to raise if Zitadel ever
+// complains — a GOAWAY costs a reconnect, not a failed request.
+var zitadelKeepalive = keepalive.ClientParameters{
+	Time:                150 * time.Second,
+	Timeout:             20 * time.Second,
+	PermitWithoutStream: true,
+}
 
 type userOrgEntry struct {
 	org       string
@@ -73,7 +97,9 @@ func New(ctx context.Context, logger *slog.Logger, cfg Config) (*Syncer, error) 
 		opts = append(opts, zitadel.WithPort(uint16(port)))
 	}
 
-	api, err := client.New(ctx, zitadel.New(cfg.Domain, opts...), authOption)
+	api, err := client.New(ctx, zitadel.New(cfg.Domain, opts...), authOption,
+		client.WithGRPCDialOptions(grpc.WithKeepaliveParams(zitadelKeepalive)),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("grantsync: create client: %w", err)
 	}

@@ -33,6 +33,38 @@ import (
 
 const listPageSize = 100
 
+const (
+	// refreshTimeout bounds ONE catalog refresh against the Zitadel API.
+	//
+	// Without it the deadline is whatever the caller passes, and on the
+	// webhook path that is the inbound request context — which Zitadel does
+	// not cancel. A silently dead TCP connection (NAT idle-drop: no RST, no
+	// FIN) then parks the call in read() until the kernel's retransmission
+	// timeout expires, ~16 minutes with tcp_retries2=15. INF-528 observed
+	// exactly that: refreshes returning after 960s, six times in five days.
+	//
+	// The damage is not the slow call, it is that Zitadel's ActionTarget
+	// timeout is 10s with InterruptOnError=false — it abandons the hook and
+	// mints the token WITHOUT the groups claim. A successful login with no
+	// authorization, and no error anywhere on the path.
+	//
+	// 3s is comfortably above the p99 (54ms observed) and far below the 10s
+	// Zitadel allows, so a stall degrades to "serve the stale catalog"
+	// instead of "hand out claimless tokens".
+	refreshTimeout = 3 * time.Second
+
+	// refreshFailureBackoff keeps a failing API from being retried by every
+	// request.
+	//
+	// A failed refresh deliberately does not advance grantedAt/fetchedAt (the
+	// entry stays stale so it is retried), but on its own that means the NEXT
+	// request retries immediately — and each retry pays refreshTimeout while
+	// holding c.mu. One dead connection thus becomes a serialized queue of
+	// timeouts. Suppressing retries briefly turns that into one attempt per
+	// backoff window; the stale catalog is served meanwhile.
+	refreshFailureBackoff = 30 * time.Second
+)
+
 // API is the subset of the Zitadel Management API the catalog needs.
 // management.ManagementServiceClient satisfies it.
 type API interface {
@@ -80,6 +112,10 @@ type orgEntry struct {
 	grantedAt time.Time
 	granted   map[string]ProjectInfo
 
+	// grantedFailedAt is when the last granted-projects refresh failed;
+	// zero when the last attempt succeeded. Gates refreshFailureBackoff.
+	grantedFailedAt time.Time
+
 	// ownedRoles: projectID → roles of projects owned by the org,
 	// fetched lazily per referenced project.
 	owned map[string]*ownedEntry
@@ -89,6 +125,9 @@ type ownedEntry struct {
 	fetchedAt time.Time
 	roles     []string
 	name      string
+
+	// failedAt mirrors orgEntry.grantedFailedAt for the per-project roles.
+	failedAt time.Time
 }
 
 // New creates a Catalog. ttl is called per lookup, so a live config source
@@ -118,11 +157,14 @@ func (c *Catalog) Project(ctx context.Context, orgID, projectID string) (Project
 
 	ttl := c.ttl()
 
-	// Refresh the granted-projects map if stale.
-	if entry.granted == nil || c.now().Sub(entry.grantedAt) > ttl {
+	// Refresh the granted-projects map if stale. A stale-but-present entry
+	// whose last refresh failed recently is served as-is: retrying on every
+	// request would serialize a timeout per caller behind c.mu.
+	if entry.granted == nil || (c.now().Sub(entry.grantedAt) > ttl && !c.inFailureBackoff(entry.grantedFailedAt)) {
 		granted, err := c.fetchGranted(ctx, orgID)
 		if err != nil {
 			c.observeRefresh(orgID, "error")
+			entry.grantedFailedAt = c.now()
 
 			if entry.granted == nil {
 				return ProjectInfo{}, fmt.Errorf("catalog: list granted projects for org %s: %w", orgID, err)
@@ -130,11 +172,13 @@ func (c *Catalog) Project(ctx context.Context, orgID, projectID string) (Project
 
 			c.logger.WarnContext(ctx, "granted-projects refresh failed, serving stale catalog",
 				slog.String("org_id", orgID),
+				slog.Duration("backoff", refreshFailureBackoff),
 				slog.Any("error", err),
 			)
 		} else {
 			entry.granted = granted
 			entry.grantedAt = c.now()
+			entry.grantedFailedAt = time.Time{}
 			c.observeRefresh(orgID, "success")
 		}
 	}
@@ -145,7 +189,7 @@ func (c *Catalog) Project(ctx context.Context, orgID, projectID string) (Project
 
 	// Not granted — treat as a project owned by the org itself.
 	owned, ok := entry.owned[projectID]
-	if !ok || c.now().Sub(owned.fetchedAt) > ttl {
+	if !ok || (c.now().Sub(owned.fetchedAt) > ttl && !c.inFailureBackoff(owned.failedAt)) {
 		roles, err := c.fetchOwnedRoles(ctx, orgID, projectID)
 		if err != nil {
 			c.observeRefresh(orgID, "error")
@@ -154,9 +198,12 @@ func (c *Catalog) Project(ctx context.Context, orgID, projectID string) (Project
 				return ProjectInfo{}, fmt.Errorf("catalog: list roles for project %s (org %s): %w", projectID, orgID, err)
 			}
 
+			owned.failedAt = c.now()
+
 			c.logger.WarnContext(ctx, "project-roles refresh failed, serving stale catalog",
 				slog.String("org_id", orgID),
 				slog.String("project_id", projectID),
+				slog.Duration("backoff", refreshFailureBackoff),
 				slog.Any("error", err),
 			)
 		} else {
@@ -169,8 +216,25 @@ func (c *Catalog) Project(ctx context.Context, orgID, projectID string) (Project
 	return ProjectInfo{ProjectID: projectID, Name: owned.name, Roles: owned.roles}, nil
 }
 
+// inFailureBackoff reports whether a refresh failed recently enough that it
+// should not be retried yet. The zero time (never failed, or last attempt
+// succeeded) is never in backoff.
+func (c *Catalog) inFailureBackoff(failedAt time.Time) bool {
+	return !failedAt.IsZero() && c.now().Sub(failedAt) < refreshFailureBackoff
+}
+
+// withRefreshTimeout bounds one refresh. See refreshTimeout: the webhook path
+// inherits a request context Zitadel never cancels, so without this a dead
+// connection blocks for the kernel's TCP timeout rather than ours.
+func withRefreshTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, refreshTimeout)
+}
+
 // fetchGranted lists the projects granted to orgID via ProjectGrants.
 func (c *Catalog) fetchGranted(ctx context.Context, orgID string) (map[string]ProjectInfo, error) {
+	ctx, cancel := withRefreshTimeout(ctx)
+	defer cancel()
+
 	orgCtx := middleware.SetOrgID(ctx, orgID)
 	granted := make(map[string]ProjectInfo)
 
@@ -207,6 +271,9 @@ func (c *Catalog) fetchGranted(ctx context.Context, orgID string) (map[string]Pr
 // a failure degrades to an empty name (role-claims entries for the project are
 // skipped) without failing the catalog lookup — roles stay usable.
 func (c *Catalog) fetchOwnedName(ctx context.Context, orgID, projectID string) string {
+	ctx, cancel := withRefreshTimeout(ctx)
+	defer cancel()
+
 	orgCtx := middleware.SetOrgID(ctx, orgID)
 
 	resp, err := c.api.GetProjectByID(orgCtx, &management.GetProjectByIDRequest{Id: projectID})
@@ -225,6 +292,9 @@ func (c *Catalog) fetchOwnedName(ctx context.Context, orgID, projectID string) s
 
 // fetchOwnedRoles lists the role keys of a project owned by orgID.
 func (c *Catalog) fetchOwnedRoles(ctx context.Context, orgID, projectID string) ([]string, error) {
+	ctx, cancel := withRefreshTimeout(ctx)
+	defer cancel()
+
 	orgCtx := middleware.SetOrgID(ctx, orgID)
 
 	var roles []string
