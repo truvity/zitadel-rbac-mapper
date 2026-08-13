@@ -5,6 +5,15 @@ All notable changes to zitadel-rbac-mapper are documented here.
 ## [Unreleased]
 
 ### Added
+- Machine-user enrichment (`orgs.*.machineUsers`, truvity/gitops
+  INF-452/474 — the CI identity face): machine users whose username
+  matches `usernamePattern` get a synthetic `email` claim
+  (`{username}@{emailDomain}`; Kubernetes IdPs with UsernameClaim=email
+  reject tokens without one) plus a `groups` claim flattened from the
+  verified payload's user_grants — no rules, no resolver, no grant sync
+  for machines. Machine-only orgs may omit the resolver; humans landing
+  in one fail closed. Non-matching machine users keep the legacy skip.
+  New webhook outcome metric label: `machine_enriched`.
 - Suspension awareness end to end (INF-518, needs google-group-sync
   ≥ 0.12.0 — an older resolver never sets the field, which fails safe):
   the resolver's `suspended` signal now means "gets nothing, keeps

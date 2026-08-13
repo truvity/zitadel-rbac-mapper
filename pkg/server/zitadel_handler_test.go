@@ -829,3 +829,148 @@ func TestWebhook_ActiveUser_ClaimsSurviveSuspendedField(t *testing.T) {
 		t.Errorf("expected the group claim to survive, got %v", groups)
 	}
 }
+
+// decodeClaim returns one named claim's raw value, or nil when absent.
+func decodeClaim(t *testing.T, body io.Reader, key string) any {
+	t.Helper()
+
+	var resp struct {
+		AppendClaims []struct {
+			Key   string `json:"key"`
+			Value any    `json:"value"`
+		} `json:"append_claims"`
+	}
+
+	if err := json.NewDecoder(body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, claim := range resp.AppendClaims {
+		if claim.Key == key {
+			return claim.Value
+		}
+	}
+
+	return nil
+}
+
+// The CI identity face (INF-452/474): a machine user matching the org's
+// machineUsers pattern gets a synthetic email plus the grant-flattened
+// groups spine — from the payload's user_grants only.
+func TestWebhook_MachineUser_Enriched(t *testing.T) {
+	var logBuf bytes.Buffer
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"platform-org": {
+			Name: "Platform",
+			MachineUsers: &mapper.MachineUsersConfig{
+				UsernamePattern: `^ci-[a-z0-9-]+$`,
+				EmailDomain:     "ci.truvity.xyz",
+			},
+		},
+	}, &logBuf)
+
+	payload := `{"function":"function/preaccesstoken",` +
+		`"user":{"id":"m2","username":"ci-truvity-bar-preview"},` +
+		`"org":{"id":"platform-org"},` +
+		`"user_grants":[{"projectId":"p1","projectName":"cluster-devel","roles":["ci-truvity-bar:deployer"]}]}`
+
+	resp := postWebhook(t, app, payload)
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+
+	email := decodeClaim(t, bytes.NewReader(buf.Bytes()), "email")
+	if email != "ci-truvity-bar-preview@ci.truvity.xyz" {
+		t.Errorf("email claim = %v, want the synthetic address", email)
+	}
+
+	groups, _ := decodeClaim(t, bytes.NewReader(buf.Bytes()), "groups").([]any)
+	if len(groups) != 1 || groups[0] != "cluster-devel:ci-truvity-bar:deployer" {
+		t.Errorf("groups = %v, want the flattened grant", groups)
+	}
+}
+
+// A machine user whose username does NOT match the pattern keeps the
+// legacy skip — no email, empty groups.
+func TestWebhook_MachineUser_PatternMiss_LegacySkip(t *testing.T) {
+	var logBuf bytes.Buffer
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"platform-org": {
+			Name: "Platform",
+			MachineUsers: &mapper.MachineUsersConfig{
+				UsernamePattern: `^ci-[a-z0-9-]+$`,
+				EmailDomain:     "ci.truvity.xyz",
+			},
+		},
+	}, &logBuf)
+
+	payload := `{"function":"function/preaccesstoken",` +
+		`"user":{"id":"m3","username":"operator-platform-devel"},` +
+		`"org":{"id":"platform-org"}}`
+
+	resp := postWebhook(t, app, payload)
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+
+	if email := decodeClaim(t, bytes.NewReader(buf.Bytes()), "email"); email != nil {
+		t.Errorf("pattern-miss machine user must get no email claim, got %v", email)
+	}
+
+	if groups, _ := decodeClaim(t, bytes.NewReader(buf.Bytes()), "groups").([]any); len(groups) != 0 {
+		t.Errorf("expected empty groups, got %v", groups)
+	}
+}
+
+// Grants stay payload-only: a matching machine user with no user_grants
+// still authenticates (email present) but carries an empty spine.
+func TestWebhook_MachineUser_NoGrants_EmailOnly(t *testing.T) {
+	var logBuf bytes.Buffer
+
+	_, app := newWebhookTestDeps(t, map[string]mapper.OrgConfig{
+		"platform-org": {
+			Name: "Platform",
+			MachineUsers: &mapper.MachineUsersConfig{
+				UsernamePattern: `^ci-`,
+				EmailDomain:     "ci.truvity.xyz",
+			},
+		},
+	}, &logBuf)
+
+	payload := `{"function":"function/preuserinfo",` +
+		`"user":{"id":"m4","username":"ci-truvity-bar-preview"},` +
+		`"org":{"id":"platform-org"}}`
+
+	resp := postWebhook(t, app, payload)
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(resp.Body); err != nil {
+		t.Fatal(err)
+	}
+
+	if email := decodeClaim(t, bytes.NewReader(buf.Bytes()), "email"); email != "ci-truvity-bar-preview@ci.truvity.xyz" {
+		t.Errorf("email claim = %v, want the synthetic address", email)
+	}
+
+	if groups, _ := decodeClaim(t, bytes.NewReader(buf.Bytes()), "groups").([]any); len(groups) != 0 {
+		t.Errorf("expected empty groups, got %v", groups)
+	}
+}

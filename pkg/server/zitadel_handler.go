@@ -182,11 +182,10 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 
 		userID := payload.User.ID
 
-		// Skip machine users (no @ in identifier).
-		if !strings.Contains(email, "@") {
-			deps.observeWebhook(orgID, metrics.OutcomeMachine)
-
-			return emptyGroupsResponse(c)
+		// Machine users and machine-only orgs route away from the
+		// resolver path entirely — see machineOrEdgeResponse.
+		if handled, respErr := machineOrEdgeResponse(c, deps, logger, &org, orgID, userID, email, &payload); handled {
+			return respErr
 		}
 
 		// Email only at debug level — the hot path logs user IDs, not PII.
@@ -293,6 +292,84 @@ func NewZitadelWebhookHandler(deps *Deps, userLocks *UserLocks) fiber.Handler {
 			},
 		})
 	}
+}
+
+// machineOrEdgeResponse handles the two paths that never reach the
+// resolver: machine users (no @ in the identifier) and humans landing
+// in a machine-only org (no resolver configured).
+//
+// Machine users are enriched ONLY when the org opts a username shape in
+// via machineUsers — the CI identity face (truvity/gitops INF-452/474).
+// The synthetic email exists because Kubernetes IdPs configured with
+// UsernameClaim=email reject a token with no email claim at all; the
+// groups spine flattens from the verified payload's user_grants
+// (machine grants are provisioned structurally — rules/resolvers never
+// run for machines). Every other machine user keeps the legacy skip.
+func machineOrEdgeResponse(
+	c fiber.Ctx,
+	deps *Deps,
+	logger *slog.Logger,
+	org *mapper.OrgConfig,
+	orgID, userID, email string,
+	payload *zitadelFunctionPayload,
+) (bool, error) {
+	if !strings.Contains(email, "@") {
+		if org.MachineUsers.Matches(payload.User.Username) {
+			return true, machineEnrichedResponse(c, deps, logger, orgID, payload)
+		}
+
+		deps.observeWebhook(orgID, metrics.OutcomeMachine)
+
+		return true, emptyGroupsResponse(c)
+	}
+
+	if org.Resolver.URL == "" {
+		logger.WarnContext(c.Context(), "human user in a machine-only org, returning empty claims (fail-closed)",
+			slog.String("org_id", orgID),
+			slog.String("user_id", userID),
+		)
+		deps.observeWebhook(orgID, metrics.OutcomeEmpty)
+
+		return true, emptyGroupsResponse(c)
+	}
+
+	return false, nil
+}
+
+// machineEnrichedResponse builds the machine-user enrichment: the
+// synthetic email plus the grant-flattened groups claim. Grants come
+// exclusively from the verified payload — no rules, no resolver, no
+// grant sync; an empty grant set still returns the email (the identity
+// authenticates, then holds whatever RBAC its — absent — claims admit).
+func machineEnrichedResponse(
+	c fiber.Ctx,
+	deps *Deps,
+	logger *slog.Logger,
+	orgID string,
+	payload *zitadelFunctionPayload,
+) error {
+	org, _ := lookupOrg(c.Context(), deps.Source, orgID)
+	email := payload.User.Username + "@" + org.MachineUsers.EmailDomain
+
+	entries := payloadRoleEntries(payload.UserGrants)
+	sort.Strings(entries)
+
+	logger.InfoContext(c.Context(), "returning machine enrichment",
+		slog.String("org_id", orgID),
+		slog.String("user_id", payload.User.ID),
+		slog.String("username", payload.User.Username),
+		slog.Int("role_entries_count", len(entries)),
+	)
+	deps.observeWebhook(orgID, metrics.OutcomeMachineEnriched)
+
+	observeClaimSize(deps, orgID, entries)
+
+	return c.Status(fiber.StatusOK).JSON(setClaimsResponse{
+		AppendClaims: []*appendClaim{
+			{Key: "email", Value: email},
+			{Key: "groups", Value: entries},
+		},
+	})
 }
 
 // payloadRoleEntries flattens the verified payload's user_grants into

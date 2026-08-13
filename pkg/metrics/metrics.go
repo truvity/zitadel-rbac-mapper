@@ -16,9 +16,12 @@ const (
 	OutcomeEmpty      = "empty"       // successful, but zero groups
 	OutcomeUnknownOrg = "unknown_org" // org not configured — fail-closed empty response
 	OutcomeMachine    = "machine"     // machine user, skipped
-	OutcomeInvalidJWT = "invalid_jwt" // JWT verification failed
-	OutcomeBadPayload = "bad_payload" // payload parse failed
-	OutcomeSuspended  = "suspended"   // directory reports the account suspended — empty claims, grants pruned
+	// OutcomeMachineEnriched: a machine user in a machineUsers-enabled
+	// org — synthetic email + grant-flattened groups returned.
+	OutcomeMachineEnriched = "machine_enriched"
+	OutcomeInvalidJWT      = "invalid_jwt" // JWT verification failed
+	OutcomeBadPayload      = "bad_payload" // payload parse failed
+	OutcomeSuspended       = "suspended"   // directory reports the account suspended — empty claims, grants pruned
 )
 
 // Resolver outcome label values.

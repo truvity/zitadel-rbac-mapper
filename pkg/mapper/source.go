@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -219,6 +220,50 @@ type OrgConfig struct {
 	// groups remain the mapper's INPUT either way; this only controls what
 	// downstream systems see.
 	RoleClaimsOnly bool `yaml:"roleClaimsOnly"`
+
+	// MachineUsers enables enrichment for this org's MACHINE users — the
+	// CI identity face (truvity/gitops INF-452/474). Machine tokens are
+	// otherwise skipped, but a Kubernetes IdP configured with
+	// UsernameClaim=email rejects a token carrying no email claim at all,
+	// and the groups spine must flatten from the user's Zitadel grants
+	// (there is no directory behind a machine identity). Matching users
+	// get: a synthetic `email` claim "{username}@{emailDomain}", and a
+	// `groups` claim of "{projectName}:{roleKey}" entries flattened from
+	// the verified payload's user_grants (never from rules — machine
+	// grants are provisioned structurally, not reconciled here).
+	//
+	// An org configured ONLY for machine users may omit the resolver;
+	// its human users (if any ever appear) fail closed with empty claims.
+	MachineUsers *MachineUsersConfig `yaml:"machineUsers"`
+}
+
+// MachineUsersConfig scopes machine-user enrichment inside one org.
+type MachineUsersConfig struct {
+	// UsernamePattern is an RE2 expression the machine username must
+	// match (anchor it: "^ci-[a-z0-9-]+$"). Non-matching machine users
+	// keep the legacy behavior — no enrichment. Required.
+	UsernamePattern string `yaml:"usernamePattern"`
+
+	// EmailDomain forms the synthetic email claim
+	// "{username}@{emailDomain}". Required. Pick a domain that can never
+	// collide with a human's (e.g. "ci.truvity.xyz").
+	EmailDomain string `yaml:"emailDomain"`
+}
+
+// Matches reports whether a machine username is in scope. The pattern is
+// validated at config load; a compile failure here (impossible via the
+// loader) matches nothing.
+func (m *MachineUsersConfig) Matches(username string) bool {
+	if m == nil || username == "" {
+		return false
+	}
+
+	re, err := regexp.Compile(m.UsernamePattern)
+	if err != nil {
+		return false
+	}
+
+	return re.MatchString(username)
 }
 
 // ResolverConfig describes the per-org groups resolver endpoint and its
@@ -327,8 +372,15 @@ func (c *Config) validate() error {
 			return fmt.Errorf("orgs: empty org ID key")
 		}
 
-		if org.Resolver.URL == "" {
+		// A machine-only org (machineUsers set, no rules) needs no
+		// directory: its enrichment flattens Zitadel grants. Any org
+		// with rules still requires the resolver behind them.
+		if org.Resolver.URL == "" && (org.MachineUsers == nil || len(org.Rules) > 0) {
 			return fmt.Errorf("orgs[%s]: resolver.url is required", orgID)
+		}
+
+		if err := validateMachineUsers(orgID, org.MachineUsers); err != nil {
+			return err
 		}
 
 		if org.Resolver.MaxConcurrency < 0 {
@@ -408,4 +460,25 @@ func (c *Config) normalize() {
 
 		c.Orgs[orgID] = org
 	}
+}
+
+// validateMachineUsers checks one org's machineUsers block (nil is fine).
+func validateMachineUsers(orgID string, mu *MachineUsersConfig) error {
+	if mu == nil {
+		return nil
+	}
+
+	if mu.UsernamePattern == "" {
+		return fmt.Errorf("orgs[%s]: machineUsers.usernamePattern is required", orgID)
+	}
+
+	if _, err := regexp.Compile(mu.UsernamePattern); err != nil {
+		return fmt.Errorf("orgs[%s]: machineUsers.usernamePattern: %w", orgID, err)
+	}
+
+	if mu.EmailDomain == "" {
+		return fmt.Errorf("orgs[%s]: machineUsers.emailDomain is required", orgID)
+	}
+
+	return nil
 }
