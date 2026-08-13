@@ -352,6 +352,30 @@ func machineEnrichedResponse(
 	email := payload.User.Username + "@" + org.MachineUsers.EmailDomain
 
 	entries := payloadRoleEntries(payload.UserGrants)
+
+	// Machine token flows (jwt-bearer) deliver payloads WITHOUT
+	// user_grants even when grants exist — observed live 2026-08-13
+	// (gitops INF-452 prototype) — so fall back to a Management API
+	// lookup. A lookup failure keeps the email (authentication works)
+	// with an empty spine (authorization empty): fail-closed on
+	// authority, never on identity.
+	if len(entries) == 0 && deps.Syncer != nil {
+		looked, err := deps.Syncer.UserRoleEntries(c.Context(), payload.User.ID)
+		if err != nil {
+			logger.ErrorContext(c.Context(), "machine grant lookup failed — returning empty spine",
+				slog.String("org_id", orgID),
+				slog.String("user_id", payload.User.ID),
+				slog.Any("error", err),
+			)
+		} else {
+			entries = looked
+		}
+	}
+
+	if entries == nil {
+		entries = []string{}
+	}
+
 	sort.Strings(entries)
 
 	logger.InfoContext(c.Context(), "returning machine enrichment",
