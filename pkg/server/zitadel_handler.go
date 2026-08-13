@@ -360,7 +360,7 @@ func machineEnrichedResponse(
 	// with an empty spine (authorization empty): fail-closed on
 	// authority, never on identity.
 	if len(entries) == 0 && deps.Syncer != nil {
-		looked, err := deps.Syncer.UserRoleEntries(c.Context(), payload.User.ID)
+		looked, err := deps.Syncer.UserRoleEntries(c.Context(), payload.User.ID, orgID)
 		if err != nil {
 			logger.ErrorContext(c.Context(), "machine grant lookup failed — returning empty spine",
 				slog.String("org_id", orgID),
