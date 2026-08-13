@@ -3,6 +3,7 @@ package grantsync
 import (
 	"context"
 
+	"github.com/zitadel/zitadel-go/v3/pkg/client/middleware"
 	"github.com/zitadel/zitadel-go/v3/pkg/client/zitadel/user"
 )
 
@@ -13,7 +14,15 @@ import (
 // and resolve into the token's native roles claim — observed live
 // 2026-08-13 (gitops INF-452 prototype), so the mapper asks the
 // Management API directly.
-func (s *Syncer) UserRoleEntries(ctx context.Context, userID string) ([]string, error) {
+// orgID scopes the Management API call to the user's organization —
+// without it the API defaults to the service user's own org and finds
+// nothing for users of other orgs (the Platform org's ci-* users;
+// observed live 2026-08-13: empty spine despite a live grant).
+func (s *Syncer) UserRoleEntries(ctx context.Context, userID, orgID string) ([]string, error) {
+	if orgID != "" {
+		ctx = middleware.SetOrgID(ctx, orgID)
+	}
+
 	grants, err := s.listUserGrants(ctx, userID)
 	if err != nil {
 		return nil, err

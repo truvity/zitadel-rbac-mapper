@@ -5,6 +5,11 @@ All notable changes to zitadel-rbac-mapper are documented here.
 ## [Unreleased]
 
 ### Fixed
+- Machine grant lookup scopes the Management API call to the user's
+  org (x-zitadel-orgid) — without it the API defaults to the service
+  user's own org and silently finds nothing for Platform-org ci-*
+  users (requires the mapper's service user holding authority in that
+  org — gitops zitadel-internal grants ORG_OWNER on Platform).
 - Machine-user enrichment: machine token flows (jwt-bearer) deliver
   Actions payloads without `user_grants` even when grants exist — the
   enrichment now falls back to a Management API grant lookup; the
