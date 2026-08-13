@@ -4,6 +4,14 @@ All notable changes to zitadel-rbac-mapper are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- Machine-user enrichment: machine token flows (jwt-bearer) deliver
+  Actions payloads without `user_grants` even when grants exist — the
+  enrichment now falls back to a Management API grant lookup; the
+  groups claim is always an array (never null). A lookup failure keeps
+  the email and returns an empty spine: fail-closed on authority,
+  never on identity.
+
 ### Added
 - Machine-user enrichment (`orgs.*.machineUsers`, truvity/gitops
   INF-452/474 — the CI identity face): machine users whose username
