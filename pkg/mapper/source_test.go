@@ -292,3 +292,67 @@ employees:
 		t.Errorf("EmployeePrefix must default to emp:, got %q", got)
 	}
 }
+
+// Machine-only orgs (INF-452/474): machineUsers without a resolver is
+// valid; a half-configured machineUsers block is not.
+func TestParseConfig_MachineUsers(t *testing.T) {
+	valid := `
+orgs:
+  "platform-org":
+    name: Platform
+    machineUsers:
+      usernamePattern: "^ci-[a-z0-9-]+$"
+      emailDomain: ci.truvity.xyz
+`
+	cfg, err := ParseConfig([]byte(valid))
+	if err != nil {
+		t.Fatalf("machine-only org must not require a resolver: %v", err)
+	}
+
+	mu := cfg.Orgs["platform-org"].MachineUsers
+	if !mu.Matches("ci-truvity-bar-preview") {
+		t.Error("pattern must match the CI username shape")
+	}
+
+	if mu.Matches("operator-platform-devel") {
+		t.Error("pattern must not match non-CI machine users")
+	}
+
+	for name, bad := range map[string]string{
+		"missing pattern": `
+orgs:
+  "o":
+    machineUsers:
+      emailDomain: ci.truvity.xyz
+`,
+		"missing domain": `
+orgs:
+  "o":
+    machineUsers:
+      usernamePattern: "^ci-"
+`,
+		"invalid regexp": `
+orgs:
+  "o":
+    machineUsers:
+      usernamePattern: "^ci-["
+      emailDomain: ci.truvity.xyz
+`,
+		"rules still need resolver": `
+orgs:
+  "o":
+    machineUsers:
+      usernamePattern: "^ci-"
+      emailDomain: ci.truvity.xyz
+    rules:
+      - group: g@example.com
+        grants:
+          - project: p
+            roles: [r]
+`,
+	} {
+		if _, err := ParseConfig([]byte(bad)); err == nil {
+			t.Errorf("%s: expected validation error", name)
+		}
+	}
+}
