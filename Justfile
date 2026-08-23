@@ -36,12 +36,26 @@ vuln:
 tidy:
     go mod tidy
 
+# Render the chart with the shipped values plus a fully-featured set;
+# prove the schema rejects an unknown key (values.schema.json is the
+# contract — a typo must fail the render, not be silently ignored).
+chart-lint:
+    helm lint charts/zitadel-rbac-mapper
+    helm template zitadel-rbac-mapper charts/zitadel-rbac-mapper >/dev/null
+    helm template zitadel-rbac-mapper charts/zitadel-rbac-mapper \
+        --set env.ZITADEL_DOMAIN=auth.example.com \
+        --set zitadelKey.secretName=example-key \
+        --set httpRoute.enabled=true \
+        --set ciliumNetworkPolicy.enabled=true \
+        --set rbac.enabled=true >/dev/null
+    ! helm template zitadel-rbac-mapper charts/zitadel-rbac-mapper --set bogusKey=1 >/dev/null 2>&1
+
 # Clean build artifacts
 clean:
     rm -rf bin/ dist/ coverage.out
 
-# Run all checks (build + unit tests + integration tests + lint + vuln)
-check: build test test-integration lint vuln
+# Run all checks (build + unit tests + integration tests + lint + chart-lint + vuln)
+check: build test test-integration lint chart-lint vuln
 
 # Build a snapshot release locally (no push, no tag)
 snapshot:
