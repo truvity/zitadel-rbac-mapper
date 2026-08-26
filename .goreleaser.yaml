@@ -5,7 +5,7 @@ version: 2
 builds:
   # K8s/local binary.
   - id: zitadel-rbac-mapper
-    main: ./cmd/zitadel-rbac-mapper
+    main: ./cmd/mapper
     binary: zitadel-rbac-mapper
     env:
       - CGO_ENABLED=0
@@ -62,7 +62,7 @@ kos:
     base_image: gcr.io/distroless/static:nonroot
     sbom: none
     labels:
-      org.opencontainers.image.title: zitadel-rbac-mapper
+      org.opencontainers.image.title: mapper
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.source: https://github.com/truvity/zitadel-rbac-mapper
 

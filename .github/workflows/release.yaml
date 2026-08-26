@@ -35,6 +35,10 @@ jobs:
     permissions:
       contents: write
       packages: write
-    uses: truvity/ci-workflows/.github/workflows/release-public.yaml@ce73f615db4348e9114369c7c321ca09dcd4d361 # v2.10.8
+    uses: truvity/ci-workflows/.github/workflows/release-public.yaml@78a124c89052a6e209ea6314ffac0d05aae4005a # v2.11.0
     with:
       charts: '["zitadel-rbac-mapper"]'
+      # Nest the image under the repo namespace (INF-577 / INF-584 N1):
+      # ko names the artifact after the cmd dir (cmd/mapper), so the
+      # published slug is ghcr.io/truvity/zitadel-rbac-mapper/mapper.
+      ko-docker-repo: ghcr.io/truvity/zitadel-rbac-mapper

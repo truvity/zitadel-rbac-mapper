@@ -8,7 +8,7 @@ podDisruptionBudget:
   minAvailable: 1
 
 image:
-  repository: ghcr.io/truvity/zitadel-rbac-mapper
+  repository: ghcr.io/truvity/zitadel-rbac-mapper/mapper
   tag: ""  # defaults to appVersion
   pullPolicy: IfNotPresent
 

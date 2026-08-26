@@ -9,7 +9,7 @@ fmt:
 
 # Build all binaries
 build: fmt
-    go build -o bin/zitadel-rbac-mapper ./cmd/zitadel-rbac-mapper/
+    go build -o bin/zitadel-rbac-mapper ./cmd/mapper/
     go build -o bin/zitadel-rbac-mapper-lambda ./cmd/zitadel-rbac-mapper-lambda/
 
 # Run unit tests
