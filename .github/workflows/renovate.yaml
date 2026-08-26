@@ -26,5 +26,5 @@ permissions:
 
 jobs:
   renovate:
-    uses: truvity/ci-workflows/.github/workflows/renovate.yaml@78a124c89052a6e209ea6314ffac0d05aae4005a # v2.11.0
+    uses: truvity/ci-workflows/.github/workflows/renovate.yaml@338f9b0ec48ff3f31048ceea060890d17159e3e5 # v2.11.0
     secrets: inherit
