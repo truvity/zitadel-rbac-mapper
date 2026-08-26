@@ -26,7 +26,7 @@ spec:
               securityContext:
                 {{- toYaml $.Values.securityContext | nindent 16 }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
-              command: ["/ko-app/zitadel-rbac-mapper", "sync"]
+              args: ["sync"]  # image entrypoint; a hardcoded /ko-app/<name> breaks on cmd-dir renames
               env:
                 {{- range $key, $value := .Values.env }}
                 - name: {{ $key }}
